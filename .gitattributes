@@ -1,0 +1,22 @@
+# Normalize line endings so a Windows clone and a Linux CI runner agree.
+* text=auto eol=lf
+
+# Generated or platform-specific files keep their own bytes.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.safetensors binary
+*.wav binary
+
+# GitHub language detection: keep the Python half counted as Python.
+*.py text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.svg text eol=lf

@@ -1,0 +1,16 @@
+{
+  "meta": {
+    "title": "音乐情绪分析",
+    "description": "分析音频文件的情绪：效价/唤醒度，外加攻击性与规模感两个维度，让「悲壮」与「悲伤」不再混淆。"
+  },
+  "tools": {
+    "analyze_music_emotion": {
+      "title": "分析音乐情绪",
+      "description": "估算单个音频文件的情绪。"
+    },
+    "batch_analyze_music": {
+      "title": "批量分析音乐",
+      "description": "分析一个目录下的所有音频文件。"
+    }
+  }
+}

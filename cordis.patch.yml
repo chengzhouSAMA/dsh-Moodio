@@ -1,0 +1,9 @@
+- insert:
+    - id: music-emotion
+      name: '@local/dsh-music-emotion'
+      config:
+        # The analyzer ships inside this package at ./python, so no path needs
+        # configuring. Override projectDir only to run against a different
+        # checkout, and pythonPath only if `python` is not on PATH.
+        pythonPath: python
+        defaultTimeoutMs: 600000

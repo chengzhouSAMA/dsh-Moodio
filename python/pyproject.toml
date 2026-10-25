@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "moodio"
+version = "1.0.0"
+description = "Music emotion analysis for agents: valence/arousal plus attack (texture) and scale (grandeur)."
+readme = "../README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "moodio contributors" }]
+keywords = ["music", "emotion", "valence", "arousal", "mir", "agent"]
+dependencies = [
+    "numpy>=1.22",
+    "librosa>=0.10.0",
+    "soundfile>=0.12.0",
+]
+
+[project.optional-dependencies]
+neural = ["torch>=2.0", "transformers>=4.30"]
+
+[project.scripts]
+moodio = "moodio:main"
+
+[tool.setuptools]
+py-modules = ["moodio"]
+packages = ["music_emotion"]

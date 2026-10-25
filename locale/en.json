@@ -1,0 +1,16 @@
+{
+  "meta": {
+    "title": "Music Emotion",
+    "description": "Analyze audio files for emotion: valence/arousal plus attack (texture) and scale (grandeur), so 悲壮 and 悲伤 stay distinct."
+  },
+  "tools": {
+    "analyze_music_emotion": {
+      "title": "Analyze music emotion",
+      "description": "Estimate the emotion of one audio file."
+    },
+    "batch_analyze_music": {
+      "title": "Batch analyze music",
+      "description": "Analyze every audio file under a directory."
+    }
+  }
+}

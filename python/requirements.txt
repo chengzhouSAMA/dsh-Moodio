@@ -1,0 +1,10 @@
+# Core analysis dependencies.
+# Verified on Python 3.9 with the pinned minimums below.
+numpy>=1.22
+librosa>=0.10.0
+soundfile>=0.12.0
+
+# Optional: neural cross-check (`--neural`). Not needed for the default path.
+# These are heavy (torch) and the model weights are licensed separately
+# (CC-BY-NC-SA-4.0). Install only if you want the sidecar signal:
+#   pip install ".[neural]"

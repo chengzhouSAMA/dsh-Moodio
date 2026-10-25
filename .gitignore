@@ -1,0 +1,55 @@
+# ---- Node ----
+node_modules/
+npm-debug.log*
+yarn-error.log*
+.pnpm-store/
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- Analysis output (never commit a user's library or results) ----
+data/
+out/
+*.jsonl
+!test/fixtures/**/*.jsonl
+moodio_batch*.jsonl
+
+# ---- Audio (large binaries; keep the repo cloneable) ----
+*.mp3
+*.flac
+*.wav
+*.m4a
+*.aiff
+*.aif
+*.ogg
+*.opus
+*.wma
+!test/fixtures/**/*.wav
+
+# ---- Neural model weights (CC-BY-NC-SA; download separately) ----
+_research/
+*.safetensors
+*.ckpt
+*.pt
+*.bin
+
+# ---- OS / editors ----
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

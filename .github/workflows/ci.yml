@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  node-plugin:
+    name: Node plugin contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Syntax check
+        run: node --check index.js
+
+      - name: Offline contract tests
+        run: node test/offline.test.mjs
+
+      - name: Validate manifest and locale JSON
+        run: |
+          node -e "JSON.parse(require('fs').readFileSync('package.json','utf8'))"
+          node -e "JSON.parse(require('fs').readFileSync('locale/en.json','utf8'))"
+          node -e "JSON.parse(require('fs').readFileSync('locale/zh.json','utf8'))"
+
+  python-analyzer:
+    name: Python analyzer (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: python/requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r python/requirements.txt
+
+      # These suites are self-contained: they synthesise their own stimuli or
+      # use fixed feature probes, so CI needs no audio corpus.
+      - name: Unit and calibration tests
+        working-directory: python
+        run: |
+          python tests/validate_calibration.py
+          python tests/test_emotion_taxonomy.py
+          python tests/test_texture.py
+          python tests/test_four_axis.py
+          python tests/test_batch.py
+
+      - name: Directionality (synthesised stimuli, slower)
+        if: matrix.python-version == '3.12'
+        working-directory: python
+        run: python tests/validate_directionality.py
+
+      - name: CLI smoke test
+        working-directory: python
+        run: |
+          python - <<'PY'
+          import numpy as np, soundfile as sf
+          sr = 22050
+          t = np.arange(int(sr * 3)) / sr
+          y = 0.3 * np.sin(2 * np.pi * 220 * t)
+          sf.write("smoke.wav", y.astype("float32"), sr)
+          PY
+          python moodio.py analyze --path smoke.wav --no-segments --fields emotion,emotion_4d
+          python moodio.py --version
