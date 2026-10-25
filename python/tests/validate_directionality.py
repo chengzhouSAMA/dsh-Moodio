@@ -27,7 +27,9 @@ warnings.filterwarnings("ignore")
 
 import numpy as np
 
-sys.path.insert(0, ".")
+# Resolve the package from this file, not from the current directory: the suite
+# must pass whether it is launched from python/ or from the repository root.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from music_emotion.audio_io import ANALYSIS_SR  # noqa: E402
 from music_emotion.features import extract_features  # noqa: E402

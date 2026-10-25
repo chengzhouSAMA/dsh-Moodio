@@ -12,11 +12,14 @@
 """
 from __future__ import annotations
 
+import os
 import sys
 
 import numpy as np
 
-sys.path.insert(0, ".")
+# Resolve the package from this file, not from the current directory: the suite
+# must pass whether it is launched from python/ or from the repository root.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from music_emotion import vamodel as vm  # noqa: E402
 
