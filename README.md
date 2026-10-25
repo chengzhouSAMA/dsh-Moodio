@@ -180,8 +180,8 @@ moodio/
 ## Tests
 
 ```bash
-npm test                 # plugin contract tests (25)
-npm run test:python      # analyzer unit + calibration tests (34)
+npm test                 # plugin contract tests (28)
+npm run test:python      # analyzer unit + calibration tests (36)
 npm run test:all
 ```
 

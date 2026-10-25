@@ -28,7 +28,7 @@ motivated it.
   from the module URL, so installation needs no path configuration.
 - **Agent contract** under `python/agent/` (brief, rules, skills) with a
   documented exit-code table and structured JSON errors.
-- Regression suites that need no audio corpus: 25 plugin contract tests and 34
+- Regression suites that need no audio corpus: 28 plugin contract tests and 36
   analyzer tests, both run in CI.
 
 ### Fixed

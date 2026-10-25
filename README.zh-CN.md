@@ -135,8 +135,8 @@ moodio/
 ## 测试
 
 ```bash
-npm test                 # 插件契约测试（25 项）
-npm run test:python      # 分析器单元 + 标定测试（34 项）
+npm test                 # 插件契约测试（28 项）
+npm run test:python      # 分析器单元 + 标定测试（36 项）
 npm run test:all
 ```
 
