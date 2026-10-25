@@ -28,10 +28,19 @@ motivated it.
   from the module URL, so installation needs no path configuration.
 - **Agent contract** under `python/agent/` (brief, rules, skills) with a
   documented exit-code table and structured JSON errors.
-- Regression suites that need no audio corpus: 28 plugin contract tests and 36
+- Regression suites that need no audio corpus: 28 plugin contract tests and 45
   analyzer tests, both run in CI.
 
 ### Fixed
+
+- **Unportable test broke CI on Linux.** `test_rel_of_normalization` hard-coded
+  `C:\music`; on POSIX that is a relative path, so `relpath` returned
+  `../C:/music/...` and the assertion failed. The spellings are now derived from
+  a temporary directory, and the exact result is asserted.
+- **`validate_directionality.py` used `os` without importing it**, a
+  `NameError` that only surfaced in CI because the local script did not run that
+  suite. The suite is now part of `npm run test:python`, so local and CI run the
+  same set.
 
 - **Valence was systematically negative.** `VALENCE_NEUTRAL` was set to `0.47`
   from intuition instead of the arithmetic fixed point `Σweights × 0.5 = 0.25`.

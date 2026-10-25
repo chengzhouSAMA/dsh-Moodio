@@ -181,8 +181,9 @@ dsh-Moodio/
 
 ```bash
 npm test                 # plugin contract tests (28)
-npm run test:python      # analyzer unit + calibration tests (36)
-npm run test:all
+npm run test:python      # analyzer suites, same set CI runs (45)
+npm run test:fast        # everything except the slow directionality suite
+npm run test:all         # plugin + analyzer (73)
 ```
 
 The Python suites synthesise their own stimuli or use fixed feature probes, so

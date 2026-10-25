@@ -34,8 +34,9 @@
   ],
   "scripts": {
     "test": "node test/offline.test.mjs",
-    "test:python": "python -X utf8 python/tests/validate_calibration.py && python -X utf8 python/tests/test_emotion_taxonomy.py && python -X utf8 python/tests/test_texture.py && python -X utf8 python/tests/test_four_axis.py && python -X utf8 python/tests/test_batch.py",
-    "test:all": "npm run test && npm run test:python"
+    "test:python": "python -X utf8 python/tests/validate_calibration.py && python -X utf8 python/tests/test_emotion_taxonomy.py && python -X utf8 python/tests/test_texture.py && python -X utf8 python/tests/test_four_axis.py && python -X utf8 python/tests/test_batch.py && python -X utf8 python/tests/validate_directionality.py",
+    "test:fast": "node test/offline.test.mjs && python -X utf8 python/tests/validate_calibration.py && python -X utf8 python/tests/test_emotion_taxonomy.py && python -X utf8 python/tests/test_texture.py && python -X utf8 python/tests/test_four_axis.py && python -X utf8 python/tests/test_batch.py",
+    "test:all": "npm run test:python && npm run test"
   },
   "engines": {
     "node": ">=18"

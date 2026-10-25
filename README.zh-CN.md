@@ -136,8 +136,9 @@ dsh-Moodio/
 
 ```bash
 npm test                 # 插件契约测试（28 项）
-npm run test:python      # 分析器单元 + 标定测试（36 项）
-npm run test:all
+npm run test:python      # 分析器全部套件，与 CI 一致（45 项）
+npm run test:fast        # 除较慢的 directionality 之外的全部
+npm run test:all         # 插件 + 分析器（73 项）
 ```
 
 Python 测试自行合成刺激或使用固定特征探针，**不需要任何音频文件**即可运行。
