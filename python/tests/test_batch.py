@@ -36,15 +36,26 @@ def test_track_id_stability() -> bool:
 
 def test_rel_of_normalization() -> bool:
     print("\n[t2] 相对路径归一化")
-    root = r"C:\music"
-    forms = [
-        r"C:\music\a\b.mp3",
-        "C:/music/a/b.mp3",
-        r"C:\music\a\..\a\b.mp3",
-    ]
-    outs = {_rel_of(f, root) for f in forms}
+
+    # Build the three spellings from a real directory instead of hard-coding a
+    # Windows drive path. The previous version used r"C:\music", which on a
+    # POSIX runner is a *relative* path: os.path.abspath prepends the cwd and
+    # relpath then returns "../C:/music/...", so CI failed while local Windows
+    # runs passed. Deriving the forms from a temp directory keeps the assertion
+    # meaningful on both platforms.
+    with tempfile.TemporaryDirectory() as td:
+        root = os.path.join(td, "music")
+        target = os.path.join(root, "a", "b.mp3")
+        forms = [
+            target,                                            # native separators
+            target.replace(os.sep, "/"),                        # forward slashes
+            os.path.join(root, "a", "..", "a", "b.mp3"),        # contains ..
+        ]
+        outs = {_rel_of(f, root) for f in forms}
+
     ok = _check("三种写法归一到同一 rel", len(outs) == 1, str(outs))
-    ok &= _check("分隔符统一为 /", all("/" in o for o in outs), str(outs))
+    ok &= _check("归一结果为 a/b.mp3", outs == {"a/b.mp3"}, str(outs))
+    ok &= _check("分隔符统一为 /", all("\\" not in o for o in outs), str(outs))
     return ok
 
 
