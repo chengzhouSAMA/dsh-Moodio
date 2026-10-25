@@ -1,203 +1,187 @@
-# moodio
+# dsh-Moodio
 
-**Music emotion analysis for AI agents.** A deterministic local analyzer that turns
-an audio file into an emotion you can act on — plus two tools that let a DSH agent
-call it directly.
+Music emotion analysis, local only. Audio in, four numbers out, plus a discrete
+word derived from them.
 
-[中文说明](README.zh-CN.md) · [Algorithm notes](docs/algorithm.md) · [Changelog](CHANGELOG.md)
+It comes in two pieces: a Python analyzer (`python/moodio.py`) and a DSH host
+plugin that exposes the analyzer as two tools. No network calls, no API keys, no
+model weights to fetch for the default path.
 
----
+[中文说明](README.zh-CN.md) | [Algorithm notes](docs/algorithm.md) | [Changelog](CHANGELOG.md)
 
-## Why another music-emotion tool
+## Output
 
-Most music emotion models collapse everything into two numbers — valence and
-arousal — and then pick a word from the quadrant. That throws away the distinction
-people actually care about:
+Four axes, all computed from librosa features:
 
-| Two axes say | What it could really be |
-|---|---|
-| low arousal + minor key | **悲伤** (intimate sadness) *or* **悲壮** (sombre grandeur) |
-| high arousal + major key | **欢快** (light, bouncy) *or* **热烈** (full-blown intensity) |
+| axis | range | driven by |
+|---|---|---|
+| `valence` | -1..1 | mode score, harmonic complexity, brightness |
+| `arousal` | -1..1 | tempo, onset rate, loudness, spectral flux |
+| `texture` | 0..1 | distortion, percussion, noise floor, brightness |
+| `grandeur` | 0..1 | dynamic range, sustained loudness, spectral contrast |
 
-A slow piano ballad and a 34 dB-range orchestral epic can land on the same
-coordinate. moodio adds two more axes so they don't:
+`texture` is attack. `grandeur` is scale. They are separate on purpose: an
+orchestral piece has large grandeur and almost no texture, and if you only
+measure attack you will read it as quiet.
 
-```
-valence   -1..1    emotional polarity        (mode, harmony)
-arousal   -1..1    activation                (tempo, onset density)
-texture    0..1    attack / aggression       (distortion, percussion, noise)
-grandeur   0..1    scale / weight            (dynamic range, sustained loudness, thick texture)
-```
+Spot checks from the test corpus:
 
-`texture` and `grandeur` are **independent** on purpose. Orchestral power comes
-from scale, not from grit: a piece can be `texture 0.10 / grandeur 0.72` — the
-signature of 悲壮 — and a three-axis model that only knows "attack" will misread
-it as *quiet*.
-
-## The four axes in practice
-
-Measured on real tracks (values are from `moodio analyze`):
-
-| Track | valence | arousal | texture | grandeur | Verdict |
+| track | val | aro | tex | gran | word |
 |---|---|---|---|---|---|
-| 在虚无中永存 - 英雄主义 | −0.23 | −0.11 | **0.10** | **0.72** | **悲壮** |
-| 邓垚 - 诀别书 | −0.16 | −0.13 | 0.15 | 0.51 | **悲伤** |
-| Two Steps From Hell - Victory | +0.28 | +0.04 | 0.33 | 0.69 | **壮丽** |
-| Coldplay - Yellow | +0.21 | −0.24 | 0.36 | 0.55 | **平静** |
-| Bruno Mars - Runaway Baby | +0.17 | +0.47 | **0.57** | 0.48 | **热烈** |
+| 在虚无中永存 - 英雄主义 | -0.23 | -0.11 | 0.10 | 0.72 | 悲壮 |
+| 邓垚 - 诀别书 | -0.16 | -0.13 | 0.15 | 0.51 | 悲伤 |
+| Two Steps From Hell - Victory | +0.28 | +0.04 | 0.33 | 0.69 | 壮丽 |
+| Coldplay - Yellow | +0.21 | -0.24 | 0.36 | 0.55 | 平静 |
+| Bruno Mars - Runaway Baby | +0.17 | +0.47 | 0.57 | 0.48 | 热烈 |
 
-The two negative-valence tracks differ only in grandeur, and that is exactly the
-difference between an epic and an elegy.
+The first two sit at nearly the same valence and arousal. Grandeur is the only
+thing that separates them, and that is the whole reason the axis exists.
 
 ## Install
 
-### As a DSH plugin (gives your agent two tools)
-
-```bash
+```
 git clone https://github.com/chengzhouSAMA/dsh-Moodio.git
 cd dsh-Moodio
 pip install -r python/requirements.txt
 ```
 
-Then install it as a bundle in the DSH profile — the analyzer ships inside the
-package, so no path configuration is needed:
+Python 3.9 or newer. The plugin half also needs Node 18+.
 
-```text
-plugin_manager(action: "install_bundle", target: "<abs path to the moodio folder>")
+As a DSH bundle (registers `analyze_music_emotion` and `batch_analyze_music`):
+
+```
+plugin_manager(action: "install_bundle", target: "<abs path to dsh-Moodio>")
 ```
 
-This registers `analyze_music_emotion` and `batch_analyze_music`.
-
-### As a standalone CLI
-
-```bash
-cd python
-python moodio.py analyze --path "/path/to/track.flac"
-```
+The analyzer is inside the package at `python/`, resolved relative to `index.js`,
+so there is no path to configure. Pass `projectDir` in the plugin config only if
+you want it to run against a different checkout.
 
 ## Usage
 
-### One track
+Single file:
 
-```bash
+```
+cd python
 python moodio.py analyze --path "song.flac" --segment-sec 10 --hop-sec 10
 ```
 
-```json
+```
 {
   "emotion": { "emotion": "悲壮", "valence": -0.225, "arousal": -0.114 },
   "emotion_4d": {
     "emotion": "悲壮",
     "arousal_band": "low", "texture_band": "low", "grandeur_band": "high",
-    "texture": 0.1026, "grandeur": 0.722,
-    "desc": "宏大而不粗糙，庄严的沉郁"
+    "texture": 0.1026, "grandeur": 0.722
   },
-  "texture_parts": { "spectral_flatness": 0.034, "percussive_ratio": 0.091 },
   "grandeur_parts": { "dynamic_range_db": 0.950, "full_loud_share": 0.519 }
 }
 ```
 
-Human-readable instead of JSON:
+Add `--human` for a readable summary, `--fields` to trim the payload,
+`--no-segments` to skip the timeline.
 
-```bash
-python moodio.py analyze --path "song.flac" --human
+Whole directory:
+
 ```
-
-### A whole library
-
-```bash
 python moodio.py batch --path "~/Music" --out library.jsonl --workers 6
 ```
 
-Resumable: re-running skips tracks that already succeeded and retries the
-failures. Progress goes to stderr, so stdout stays parseable.
+Writes one JSON object per track and appends, so re-running resumes: finished
+tracks are skipped, failed ones are retried. Progress goes to stderr and stdout
+stays parseable.
 
-### A report
+Report from a finished run:
 
-```bash
+```
 python moodio.py report --path library.jsonl --calibration fixed
 ```
 
-Writes Markdown plus machine-readable JSON: distribution, quadrant shares,
-confidence, arc types, and error breakdown.
+From an agent:
 
-### From an agent
-
-Two tools, no shell plumbing required:
-
-```text
+```
 analyze_music_emotion(path: "/music/track.flac")
 batch_analyze_music(path: "/music", workers: 6)
 ```
 
-## What it will not do
+## Caveats
 
-Being explicit about this is part of the tool:
+This is a rule-based prior, not a trained model. The weights come from published
+directional results in music psychology, not from fitting listener ratings. Use it
+to rank tracks inside one run. Do not quote the numbers as population averages.
 
-- **Lyrics are not considered.** A lyrically devastating song over an upbeat
-  backing reads as upbeat.
-- **No human ratings are involved.** Weights come from published directions in
-  music psychology, not from fitting listener scores. Direction and relative
-  ranking are reliable; absolute values are not a population average. Compare
-  tracks inside one run instead of quoting numbers.
-- **Two calibration modes exist and must not be mixed.** `fixed` (default) makes
-  zero mean "neutral evidence", so results are comparable across collections.
-  `corpus-relative` re-centres on the current collection's median, which uses all
-  four quadrants on a skewed library but makes values incomparable across
-  libraries.
-- **`confidence` measures input quality** (duration, loudness, key clarity), not
-  prediction accuracy.
+Lyrics are not used at all. A miserable lyric over a bright backing track reads as
+bright.
 
-More detail, including the calibration failure that made 264 of 523 tracks read
-as "melancholic", is in [docs/algorithm.md](docs/algorithm.md).
+The two calibration modes are not interchangeable. `fixed` (default) puts zero at
+"neutral evidence", so different collections can be compared. `corpus-relative`
+re-centres on the current collection's median, which keeps all four quadrants
+reachable on a skewed library but makes the numbers incomparable across libraries.
 
-## Project layout
+`confidence` is input quality, not accuracy. Short, quiet, atonal or aperiodic
+audio scores low.
+
+Tempo detection has an octave problem. Autocorrelation often peaks at both `t` and
+`2t`; a 95 BPM reading may really be 184. Tempo carries 0.30 of arousal, so a
+wrong octave moves the result.
+
+Clipped masters lose their dynamics before analysis. `peak > 1.0` sets
+`clipping_suspected` and the warning says arousal is likely under-reported.
+
+Truncating with `--max-seconds` can delete the character of a track. A quiet intro
+will hide grandeur. Analyze the whole file for orchestral material.
+
+The calibration bug that made 264 of 523 tracks read as "melancholic" is written
+up in [docs/algorithm.md](docs/algorithm.md), along with the other ones I hit.
+
+## TODO
+
+- No human-annotated ground truth. Everything is validated against synthetic
+  stimuli and internal consistency, which is weaker than it sounds.
+- The neural sidecar (`--neural`) is a speech model on music. Absolute values are
+  compressed; only relative movement is useful. Not wired into the four-axis word.
+- `texture` and `grandeur` thresholds were calibrated on a few dozen tracks. They
+  probably do not generalise to, say, free jazz or field recordings.
+- Batch has no progress callback for the tool API, only stderr.
+- No Windows console encoding workaround beyond `-X utf8`.
+
+## Layout
 
 ```
-dsh-Moodio/
-├── index.js              # DSH Host plugin: registers the two tools
-├── cordis.patch.yml      # bundle patch
-├── locale/{en,zh}.json   # plugin display metadata
-├── icon.svg
-├── test/offline.test.mjs # plugin contract tests (no DSH needed)
-└── python/
-    ├── moodio.py         # agent-facing CLI
-    ├── requirements.txt
-    ├── music_emotion/    # analyzer package
-    │   ├── vamodel.py         # valence/arousal from acoustic cues
-    │   ├── texture.py         # texture + grandeur scores
-    │   ├── four_axis.py       # four-axis -> emotion word
-    │   ├── emotion_taxonomy.py# 2-axis fallback vocabulary
-    │   ├── features.py        # librosa feature extraction (cached per track)
-    │   ├── pipeline.py        # orchestration
-    │   ├── batch.py           # resumable library runs
-    │   ├── report.py          # markdown/JSON summary
-    │   └── neural.py          # optional wav2small sidecar
-    ├── agent/            # machine-readable usage contract (brief/rules/skills)
-    └── tests/            # self-contained suites (no audio corpus required)
+index.js              DSH host plugin
+cordis.patch.yml      bundle patch
+locale/{en,zh}.json   plugin metadata
+icon.svg
+test/offline.test.mjs plugin contract tests, no DSH runtime needed
+python/
+  moodio.py           CLI
+  music_emotion/      analyzer package
+    vamodel.py        valence/arousal from acoustic cues
+    texture.py        texture and grandeur scores
+    four_axis.py      four axes to an emotion word
+    emotion_taxonomy.py   two-axis fallback vocabulary
+    features.py       librosa extraction, shared once per track
+    pipeline.py       orchestration
+    batch.py          resumable directory runs
+    report.py         markdown and JSON summary
+    neural.py         optional wav2small sidecar
+  agent/              usage contract for agents (brief, rules, skills)
+  tests/              self-contained suites
 ```
 
 ## Tests
 
-```bash
-npm test                 # plugin contract tests (28)
-npm run test:python      # analyzer suites, same set CI runs (45)
-npm run test:fast        # everything except the slow directionality suite
-npm run test:all         # plugin + analyzer (73)
+```
+npm run test:fast      # plugin + five analyzer suites (64)
+npm run test:python    # same six suites CI runs (45)
+npm run test:all       # everything (73)
+npm test               # plugin contract only (28)
 ```
 
-The Python suites synthesise their own stimuli or use fixed feature probes, so
-they run without any audio files. CI runs both halves on every push.
-
-## Requirements
-
-- Python ≥ 3.9 with `numpy`, `librosa`, `soundfile`
-- Node ≥ 18 (plugin half only)
-- Audio decoding uses libsndfile; MP3 works when libsndfile is built with mpg123
-  (the common case). `m4a`/`aac` need conversion first.
+The Python suites synthesize their own stimuli or use fixed feature probes, so
+none of them need an audio file. CI runs both halves on push.
 
 ## License
 
-MIT. The optional neural cross-check is written against `audeering/wav2small`,
-whose weights are CC-BY-NC-SA-4.0 and are **not** bundled here — see
-[LICENSE](LICENSE) for the third-party notice.
+MIT. The optional neural check is written against `audeering/wav2small`, whose
+weights are CC-BY-NC-SA-4.0 and are not included here. See [LICENSE](LICENSE).
