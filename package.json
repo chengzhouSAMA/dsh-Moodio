@@ -1,5 +1,5 @@
 {
-  "name": "@local/dsh-music-emotion",
+  "name": "dsh-moodio",
   "version": "1.0.0",
   "description": "Agent tools for music emotion analysis: valence/arousal plus attack (texture) and scale (grandeur), keeping 悲壮 distinct from 悲伤. Ships a self-contained Python analyzer.",
   "keywords": [

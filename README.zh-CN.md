@@ -49,8 +49,8 @@ grandeur   0..1   规模感/重量      （动态范围、持续强奏、厚织�
 ### 作为 DSH 插件（给你的 agent 两个工具）
 
 ```bash
-git clone <本仓库> moodio
-cd moodio
+git clone https://github.com/chengzhouSAMA/dsh-Moodio.git
+cd dsh-Moodio
 pip install -r python/requirements.txt
 ```
 
@@ -118,7 +118,7 @@ batch_analyze_music(path: "/music", workers: 6)
 ## 目录结构
 
 ```
-moodio/
+dsh-Moodio/
 ├── index.js              # DSH Host 插件：注册两个工具
 ├── cordis.patch.yml      # bundle patch
 ├── locale/{en,zh}.json   # 插件显示元数据

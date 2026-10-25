@@ -54,8 +54,8 @@ difference between an epic and an elegy.
 ### As a DSH plugin (gives your agent two tools)
 
 ```bash
-git clone <this-repo> moodio
-cd moodio
+git clone https://github.com/chengzhouSAMA/dsh-Moodio.git
+cd dsh-Moodio
 pip install -r python/requirements.txt
 ```
 
@@ -154,7 +154,7 @@ as "melancholic", is in [docs/algorithm.md](docs/algorithm.md).
 ## Project layout
 
 ```
-moodio/
+dsh-Moodio/
 ├── index.js              # DSH Host plugin: registers the two tools
 ├── cordis.patch.yml      # bundle patch
 ├── locale/{en,zh}.json   # plugin display metadata

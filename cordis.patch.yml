@@ -1,6 +1,6 @@
 - insert:
     - id: music-emotion
-      name: '@local/dsh-music-emotion'
+      name: 'dsh-moodio'
       config:
         # The analyzer ships inside this package at ./python, so no path needs
         # configuring. Override projectDir only to run against a different
