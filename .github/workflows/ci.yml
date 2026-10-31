@@ -26,6 +26,9 @@ jobs:
       - name: Offline contract tests
         run: node test/offline.test.mjs
 
+      - name: Research contract tests
+        run: node --test test/research.test.mjs
+
       - name: Validate manifest and locale JSON
         run: |
           node -e "JSON.parse(require('fs').readFileSync('package.json','utf8'))"
@@ -34,11 +37,19 @@ jobs:
 
   python-analyzer:
     name: Python analyzer (${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    # ubuntu-latest moved to Ubuntu 26.04 in October 2026 and the
+    # actions/python-versions manifest publishes no 3.9 build for that image,
+    # so setup-python failed before any test ran. 3.9 stays covered on 22.04,
+    # which still has a published 3.9 build; 3.12 runs on the current image.
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.9", "3.12"]
+        include:
+          - os: ubuntu-22.04
+            python-version: "3.9"
+          - os: ubuntu-latest
+            python-version: "3.12"
     steps:
       - uses: actions/checkout@v4
 
@@ -63,6 +74,8 @@ jobs:
           python tests/test_texture.py
           python tests/test_four_axis.py
           python tests/test_batch.py
+          python tests/test_axes_v2.py
+          python tests/test_lyrics.py
 
       - name: Directionality (synthesised stimuli, slower)
         if: matrix.python-version == '3.12'
