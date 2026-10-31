@@ -19,7 +19,7 @@ os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 
 # ---------------------------------------------------------------- 约定
 
-VERSION = "2.2.0"
+VERSION = "2.2.1"
 AGENT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent")
 
 EXIT_OK = 0

@@ -4,6 +4,21 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.1] — 2026-11-01
+
+### Fixed
+
+- CI: the Python 3.9 job now runs on `ubuntu-22.04`. `ubuntu-latest` moved to
+  Ubuntu 26.04, where `actions/python-versions` publishes no 3.9 build, so
+  `setup-python` failed before a single test ran.
+- CI: the `axes_v2`, `lyrics` and `research` suites added in 2.2.0 are now part
+  of the workflow; previously CI never ran them.
+
+### Changed
+
+- CI actions updated to `checkout@v7`, `setup-python@v7` and `setup-node@v7`, and
+  the plugin contract job runs on Node 24 (Node 20 reached end of life).
+
 ## [2.2.0] — 2026-10-31
 
 ### Changed

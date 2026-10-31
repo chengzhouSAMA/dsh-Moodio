@@ -1,6 +1,6 @@
 {
   "name": "dsh-moodio",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "description": "Music emotion with optional 12-axis acoustic diagnostics, local lyrics ASR, and required online background/lyrics lookup.",
   "keywords": [
     "dsh",
