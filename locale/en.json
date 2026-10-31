@@ -1,7 +1,7 @@
 {
   "meta": {
     "title": "Music Emotion",
-    "description": "Analyze audio files for emotion: valence/arousal plus attack (texture) and scale (grandeur), so 悲壮 and 悲伤 stay distinct."
+    "description": "Analyze four-axis music emotion with optional twelve-axis diagnostics; every Host call first searches online for creation background and lyrics, never reviews."
   },
   "tools": {
     "analyze_music_emotion": {
@@ -11,6 +11,10 @@
     "batch_analyze_music": {
       "title": "Batch analyze music",
       "description": "Analyze every audio file under a directory."
+    },
+    "transcribe_music_lyrics": {
+      "title": "Transcribe sung lyrics",
+      "description": "Guess sung words from audio using a local Whisper model."
     }
   }
 }

@@ -1,11 +1,13 @@
 # dsh-Moodio
 
-Music emotion analysis, local only. Audio in, four numbers out, plus a discrete
-word derived from them.
+The Python acoustic analyzer works offline. The DSH Host plugin requires online
+searches for song creation background and lyrics before every tool use, then
+returns acoustic emotion coordinates plus source links. Song reviews/comments
+are excluded from search queries and returned sources.
 
 It comes in two pieces: a Python analyzer (`python/moodio.py`) and a DSH host
-plugin that exposes the analyzer as two tools. No network calls, no API keys, no
-model weights to fetch for the default path.
+plugin exposing three tools (emotion, batch, and optional lyrics transcription).
+Search failure stops Host analysis; the standalone Python acoustic CLI stays offline.
 
 [中文说明](README.zh-CN.md) | [Algorithm notes](docs/algorithm.md) | [Changelog](CHANGELOG.md)
 
@@ -37,6 +39,19 @@ Spot checks from the test corpus:
 The first two sit at nearly the same valence and arousal. Grandeur is the only
 thing that separates them, and that is the whole reason the axis exists.
 
+## Twelve-axis diagnostics (opt-in)
+
+Pass `include_axes_v2: true` to `analyze_music_emotion` or
+`batch_analyze_music`, or `--axes-v2` to the Python CLI. The supplied
+`music axes v2` algorithm adds twelve independent acoustic diagnostics:
+Valence, Energy, Brightness, Warmth, Dissonance, Tempo, RhythmicRegularity,
+Percussiveness, Density, Grandeur, BuildContrast, and HarmonicComplexity.
+It scores the **entire analyzed audio** from the already loaded waveform; the
+original four-axis label remains unchanged. Only an explicit `max_seconds`
+option limits both analyses to part of a track. Twelve-axis values
+are 0..1 measurements with different normalization from `emotion_4d` and must
+not be treated as interchangeable. Tempo/Density/Dissonance retain raw units.
+
 ## Install
 
 ```
@@ -45,9 +60,13 @@ cd dsh-Moodio
 pip install -r python/requirements.txt
 ```
 
-Python 3.9 or newer. The plugin half also needs Node 18+.
+Python 3.9 or newer. The plugin half also needs Node 18+ and an available
+Host `web.search` provider. The Host sends only the cleaned audio filename,
+never local directory paths, in its two searches per song. If the web provider
+fails, the plugin returns `WEB_RESEARCH_FAILED` without analyzing.
 
-As a DSH bundle (registers `analyze_music_emotion` and `batch_analyze_music`):
+As a DSH bundle (registers `analyze_music_emotion`, `batch_analyze_music`, and
+`transcribe_music_lyrics`):
 
 ```
 plugin_manager(action: "install_bundle", target: "<abs path to dsh-Moodio>")
@@ -64,6 +83,7 @@ Single file:
 ```
 cd python
 python moodio.py analyze --path "song.flac" --segment-sec 10 --hop-sec 10
+python moodio.py analyze --path "song.flac" --axes-v2 --fields emotion,emotion_4d,axes_v2
 ```
 
 ```
@@ -101,8 +121,37 @@ From an agent:
 
 ```
 analyze_music_emotion(path: "/music/track.flac")
+analyze_music_emotion(path: "/music/track.flac", include_axes_v2: true)
 batch_analyze_music(path: "/music", workers: 6)
+transcribe_music_lyrics(path: "/music/track.flac", model_dir: "/models/faster-whisper")
 ```
+
+Each Host tool call searches creation background and lyrics anew; it returns
+source links and short background previews in `research`. It never queries song
+reviews/comments. These search results are unverified leads, not official lyrics
+or a human-rated emotion label. Batch returns `research_by_track` for each
+pending song, capped at 50 per call; pass `limit: 50` and resume for larger sets.
+The Python CLI remains offline unless you explicitly run a separate web workflow.
+
+## Lyrics (opt-in)
+
+Install the optional `faster-whisper` package separately; prepare a **local**
+CTranslate2 Whisper model directory containing `model.bin` first (see the
+[upstream model documentation](https://github.com/SYSTRAN/faster-whisper)).
+No model weights are downloaded automatically; Host song searches still require
+network access.
+
+```
+python -m pip install faster-whisper
+python python/moodio.py lyrics --path "song.mp3" --model-dir "/models/faster-whisper" --language en
+```
+
+Alternatively set `MOODIO_LYRICS_MODEL_DIR` instead of passing `--model-dir`.
+The CLI returns JSON with the guessed text and timestamps; use `--device cuda`
+only if a compatible GPU runtime is installed. It transcribes the given audio
+without automatically separating vocals. Sung words over dense instrumentation
+may be missed or invented, so verify against the recording. The lyrics output
+does **not** modify the four-axis emotion score.
 
 ## Caveats
 
@@ -110,8 +159,8 @@ This is a rule-based prior, not a trained model. The weights come from published
 directional results in music psychology, not from fitting listener ratings. Use it
 to rank tracks inside one run. Do not quote the numbers as population averages.
 
-Lyrics are not used at all. A miserable lyric over a bright backing track reads as
-bright.
+Lyrics are not fed into the emotion model. A miserable lyric over bright backing
+can still score as bright; transcription is a separate, optional output.
 
 The two calibration modes are not interchangeable. `fixed` (default) puts zero at
 "neutral evidence", so different collections can be compared. `corpus-relative`
@@ -125,8 +174,9 @@ Tempo detection has an octave problem. Autocorrelation often peaks at both `t` a
 `2t`; a 95 BPM reading may really be 184. Tempo carries 0.30 of arousal, so a
 wrong octave moves the result.
 
-Clipped masters lose their dynamics before analysis. `peak > 1.0` sets
-`clipping_suspected` and the warning says arousal is likely under-reported.
+Clipped masters lose their dynamics before analysis. A peak amplitude of
+`>= 0.995` sets `clipping_suspected`; the warning notes that dynamic features
+may be distorted.
 
 Truncating with `--max-seconds` can delete the character of a track. A quiet intro
 will hide grandeur. Analyze the whole file for orchestral material.
@@ -162,9 +212,11 @@ python/
     emotion_taxonomy.py   two-axis fallback vocabulary
     features.py       librosa extraction, shared once per track
     pipeline.py       orchestration
+    axes_v2.py        optional 12-axis diagnostics (source script integrated)
     batch.py          resumable directory runs
     report.py         markdown and JSON summary
     neural.py         optional wav2small sidecar
+    lyrics.py         optional local singing transcription
   agent/              usage contract for agents (brief, rules, skills)
   tests/              self-contained suites
 ```
@@ -172,10 +224,10 @@ python/
 ## Tests
 
 ```
-npm run test:fast      # plugin + five analyzer suites (64)
-npm run test:python    # same six suites CI runs (45)
-npm run test:all       # everything (73)
-npm test               # plugin contract only (28)
+npm run test:fast      # plugin + fast Python suites, including lyrics stubs
+npm run test:python    # all Python suites and directionality checks
+npm run test:all       # Python + plugin
+npm test               # plugin contract only
 ```
 
 The Python suites synthesize their own stimuli or use fixed feature probes, so

@@ -1,6 +1,7 @@
 # Core analysis dependencies.
 # Verified on Python 3.9 with the pinned minimums below.
 numpy>=1.22
+scipy>=1.9
 librosa>=0.10.0
 soundfile>=0.12.0
 
@@ -8,3 +9,7 @@ soundfile>=0.12.0
 # These are heavy (torch) and the model weights are licensed separately
 # (CC-BY-NC-SA-4.0). Install only if you want the sidecar signal:
 #   pip install ".[neural]"
+
+# 可选：本地歌曲唱词转写（`moodio lyrics`），默认情绪分析不安装：
+#   python -m pip install faster-whisper
+# 须提供包含 model.bin 的本地 CTranslate2 模型目录；CLI 不自动下载权重。

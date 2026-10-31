@@ -4,6 +4,51 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] — 2026-10-31
+
+### Changed
+
+- Optional twelve-axis diagnostics now process the **entire analyzed track**
+  instead of a middle 60-second excerpt. The original four-axis score remains
+  unchanged; `max_seconds` still limits both when explicitly requested.
+- Standalone `axes_v2` reading defaults to the whole file. Passing a positive
+  `--seconds` explicitly selects a middle excerpt for a quick preview.
+
+## [2.1.0] — 2026-10-31
+
+### Added
+
+- Optional `axes_v2` diagnostics from the supplied 12-axis CPU script, based on the
+  middle 60 seconds of the already loaded audio. The full-track four-axis
+  emotion score and label remain unchanged.
+- `--axes-v2` for single-file and batch CLI runs, and `include_axes_v2` for
+  the corresponding Host tools; batch records store twelve axes when requested.
+- Synthetic and plugin-contract tests for value ranges and legacy score stability.
+
+## [2.0.0] — 2026-10-31
+
+### Changed
+
+- **Breaking:** every Host tool call now searches online for song creation background
+  and lyrics before analyzing. Song reviews/comments are excluded from queries and
+  cited sources. Web search failure blocks analysis rather than silently falling
+  back to an unsourced emotion interpretation.
+- Batch mode researches each pending track (maximum 50 per invocation), then
+  checks that the processed track list still matches the researched list.
+- The standalone Python acoustic CLI remains usable offline; the Host plugin is
+  intentionally online-only. Online text never changes four-axis acoustic scores.
+
+## [1.1.0] — 2026-10-31
+
+### Added
+
+- Optional local sung-lyrics transcription via `moodio lyrics` and the
+  `transcribe_music_lyrics` Host tool. Results include timestamped ASR guesses;
+  lyrics do not influence the acoustic emotion model.
+- Explicit dependency/model preflight errors; Moodio never downloads models
+  automatically.
+- Offline contract tests for model loading, transcription, CLI and tool wiring.
+
 ## [1.0.0] — 2026-10-25
 
 First public release. The analyzer, the four-axis model, and the DSH plugin are

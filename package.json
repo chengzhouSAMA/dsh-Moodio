@@ -1,7 +1,7 @@
 {
   "name": "dsh-moodio",
-  "version": "1.0.0",
-  "description": "Agent tools for music emotion analysis: valence/arousal plus attack (texture) and scale (grandeur), keeping 悲壮 distinct from 悲伤. Ships a self-contained Python analyzer.",
+  "version": "2.2.0",
+  "description": "Music emotion with optional 12-axis acoustic diagnostics, local lyrics ASR, and required online background/lyrics lookup.",
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -23,6 +23,7 @@
   },
   "files": [
     "index.js",
+    "research.js",
     "cordis.patch.yml",
     "locale/*.json",
     "icon.svg",
@@ -33,9 +34,9 @@
     "python/tests/*.py"
   ],
   "scripts": {
-    "test": "node test/offline.test.mjs",
-    "test:python": "python -X utf8 python/tests/validate_calibration.py && python -X utf8 python/tests/test_emotion_taxonomy.py && python -X utf8 python/tests/test_texture.py && python -X utf8 python/tests/test_four_axis.py && python -X utf8 python/tests/test_batch.py && python -X utf8 python/tests/validate_directionality.py",
-    "test:fast": "node test/offline.test.mjs && python -X utf8 python/tests/validate_calibration.py && python -X utf8 python/tests/test_emotion_taxonomy.py && python -X utf8 python/tests/test_texture.py && python -X utf8 python/tests/test_four_axis.py && python -X utf8 python/tests/test_batch.py",
+    "test": "node test/offline.test.mjs && node --test test/research.test.mjs",
+    "test:python": "python -X utf8 python/tests/validate_calibration.py && python -X utf8 python/tests/test_emotion_taxonomy.py && python -X utf8 python/tests/test_texture.py && python -X utf8 python/tests/test_four_axis.py && python -X utf8 python/tests/test_batch.py && python -X utf8 python/tests/test_lyrics.py && python -X utf8 python/tests/test_axes_v2.py && python -X utf8 python/tests/validate_directionality.py",
+    "test:fast": "npm test && python -X utf8 python/tests/validate_calibration.py && python -X utf8 python/tests/test_emotion_taxonomy.py && python -X utf8 python/tests/test_texture.py && python -X utf8 python/tests/test_four_axis.py && python -X utf8 python/tests/test_batch.py && python -X utf8 python/tests/test_lyrics.py && python -X utf8 python/tests/test_axes_v2.py",
     "test:all": "npm run test:python && npm run test"
   },
   "engines": {

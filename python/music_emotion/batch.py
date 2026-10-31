@@ -23,6 +23,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 __all__ = [
     "AUDIO_EXTS",
     "scan_audio",
+    "pending_audio",
     "track_id",
     "analyze_one",
     "run_batch",
@@ -58,6 +59,7 @@ def analyze_one(
     max_seconds: float = 0.0,
     with_neural: bool = False,
     neural_model_dir: Optional[str] = None,
+    with_axes_v2: bool = False,
 ) -> Dict[str, Any]:
     """分析单个文件，返回紧凑记录。异常在此吞掉并转成 error 字段。
 
@@ -89,11 +91,12 @@ def analyze_one(
             hop_sec=hop_sec,
             with_neural=with_neural,
             neural_model_dir=neural_model_dir,
+            with_axes_v2=with_axes_v2,
         )
         d = report.to_dict(include_segments=False)
         feats = d.get("features") or {}
         emo = d.get("emotion") or {}
-        return {
+        rec = {
             "id": tid,
             "path": rel,
             "error": None,
@@ -117,6 +120,9 @@ def analyze_one(
             "rms_db": round(float(feats.get("rms_db", 0.0)), 2),
             "elapsed_sec": round(time.time() - t0, 2),
         }
+        if with_axes_v2:
+            rec["axes_v2"] = d["axes_v2"]
+        return rec
     except MusicEmotionError as exc:
         return {
             "id": tid, "path": rel, "error": exc.code,
@@ -163,6 +169,20 @@ def _load_done(out_path: Path) -> set:
     return done
 
 
+def pending_audio(root: str, out_path: str, limit: int = 0, resume: bool = True) -> Dict[str, Any]:
+    """列出本次真正会处理的曲目，供联网预检与实际执行共用。"""
+    if limit < 0:
+        raise ValueError("limit must be nonnegative")
+    files = scan_audio(root)
+    done = _load_done(Path(out_path)) if resume else set()
+    root_abs = os.path.abspath(root)
+    pending = [_rel_of(str(f), root_abs) for f in files]
+    pending = [rel for rel in pending if rel not in done]
+    if limit:
+        pending = pending[:limit]
+    return {"scanned": len(files), "done_before": len(done), "pending": pending}
+
+
 def run_batch(
     root: str,
     out_path: str,
@@ -175,31 +195,26 @@ def run_batch(
     neural_model_dir: Optional[str] = None,
     resume: bool = True,
     log: Optional[Callable[[str], None]] = None,
+    preflight_files: Optional[List[str]] = None,
+    with_axes_v2: bool = False,
 ) -> Dict[str, Any]:
     """跑完整个目录，逐条追加写入 out_path，返回汇总。"""
     say = log or (lambda _m: None)
     out_p = Path(out_path)
     out_p.parent.mkdir(parents=True, exist_ok=True)
 
-    files = scan_audio(root)
+    selection = pending_audio(root, out_path, limit=limit, resume=resume)
+    if preflight_files is not None and selection["pending"] != preflight_files:
+        raise ValueError("preflight song list changed; search again before analysis")
     root_abs = os.path.abspath(root)
-
-    done = _load_done(out_p) if resume else set()
+    todo = [(os.path.join(root_abs, *rel.split("/")), root_abs) for rel in selection["pending"]]
     if not resume and out_p.exists():
         out_p.unlink()
 
-    todo = []
-    for f in files:
-        rel = _rel_of(str(f), root_abs)
-        if rel not in done:
-            todo.append((str(f), root_abs))
-    if limit:
-        todo = todo[:limit]
-
-    say(f"scanned={len(files)} already_done={len(done)} todo={len(todo)} workers={workers}")
+    say(f"scanned={selection['scanned']} already_done={selection['done_before']} todo={len(todo)} workers={workers}")
     if not todo:
         return {
-            "scanned": len(files), "done_before": len(done),
+            "scanned": selection["scanned"], "done_before": selection["done_before"],
             "processed": 0, "ok": 0, "failed": 0,
             "out": str(out_p), "elapsed_sec": 0.0,
         }
@@ -216,7 +231,7 @@ def run_batch(
             futs = {
                 ex.submit(
                     analyze_one, path, r, segment_sec, hop_sec,
-                    max_seconds, with_neural, neural_model_dir,
+                    max_seconds, with_neural, neural_model_dir, with_axes_v2,
                 ): path
                 for path, r in todo
             }
@@ -249,8 +264,8 @@ def run_batch(
                         )
 
     return {
-        "scanned": len(files),
-        "done_before": len(done),
+        "scanned": selection["scanned"],
+        "done_before": selection["done_before"],
         "processed": len(todo),
         "ok": ok,
         "failed": failed,

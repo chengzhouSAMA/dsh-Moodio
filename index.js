@@ -28,8 +28,10 @@
 import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { researchSong } from './research.js'
 
-/** Exit codes mirrored from moodio.py; kept in sync deliberately. */
+/** Exit codes mirrored from moodio.py; kept in sync deliberately.
+ *  10/11 为保留码，当前 moodio 不会发出。 */
 const EXIT_CODES = {
   0: 'success',
   1: 'general error / batch finished with failures',
@@ -67,7 +69,7 @@ const RESULT_FIELDS = [
 export const name = 'music-emotion'
 
 /** Required Host services. Declared so the row waits for them instead of racing. */
-export const inject = ['tools', 'subprocess']
+export const inject = ['tools', 'subprocess', 'web']
 
 /**
  * Collect-mode readers are offset based and non-consuming, so read once from 0.
@@ -85,16 +87,15 @@ function readCollected(reader) {
 
 /** Extract the structured error object moodio writes to stderr, if present. */
 function parseStructuredError(text) {
-  const trimmed = (text ?? '').trim()
-  if (!trimmed) return undefined
-  const candidates = [trimmed.slice(trimmed.indexOf('{')), ...trimmed.split('\n').filter((l) => l.trim().startsWith('{'))]
-  for (const candidate of candidates) {
-    if (!candidate || candidate === trimmed.slice(-1)) continue
+  // stderr 可能先有库日志；只接受能解析成 error: true 的 JSON 行。
+  for (const line of (text ?? '').split('\n')) {
+    const jsonStart = line.indexOf('{')
+    if (jsonStart < 0) continue
     try {
-      const parsed = JSON.parse(candidate)
+      const parsed = JSON.parse(line.slice(jsonStart).trim())
       if (parsed && typeof parsed === 'object' && parsed.error === true) return parsed
     } catch {
-      /* try the next candidate */
+      /* 跳过无法解析的日志行 */
     }
   }
   return undefined
@@ -241,7 +242,7 @@ async function runAnalyzer(ctx, cfg, argv, { timeoutMs, signal } = {}) {
 }
 
 /** Build a compact, decision-ready summary instead of dumping the whole report. */
-function summarizeAnalysis(data, { includeSegments, includeEvidence }) {
+function summarizeAnalysis(data, { includeSegments, includeEvidence, includeAxesV2 }) {
   const emo = data.emotion ?? {}
   const four = data.emotion_4d ?? {}
   const quality = data.quality ?? {}
@@ -289,12 +290,26 @@ function summarizeAnalysis(data, { includeSegments, includeEvidence }) {
   } else {
     out.segments = []
   }
+  if (includeAxesV2 && data.axes_v2) out.axes_v2 = data.axes_v2
   if (includeEvidence) {
     if (data.deltas) out.deltas = data.deltas
     if (data.features) out.features = data.features
     if (data.modes) out.modes = data.modes
   }
   return out
+}
+
+async function requireResearch(ctx, audioPath, signal) {
+  try {
+    return { ok: true, data: await researchSong(ctx.web, audioPath, signal) }
+  } catch (error) {
+    return {
+      ok: false,
+      code: 'WEB_RESEARCH_FAILED',
+      message: `background and lyrics lookup failed: ${error instanceof Error ? error.message : String(error)}`,
+      suggestion: 'Restore the web search service and retry; Moodio does not analyze without both searches.',
+    }
+  }
 }
 
 function fail(value) {
@@ -333,8 +348,10 @@ export function apply(ctx, config = {}) {
           'The emotion word derives from all four, which keeps sombre-and-grand (悲壮) distinct from ' +
           'intimate sadness (悲伤), and triumphant (昂扬) distinct from cheerful (欢快). ' +
           'Use this instead of guessing emotion from a title or artist: it reads the actual audio. ' +
-          'Limits: lyrics and semantics are NOT considered; values are relative coordinates from an ' +
-          'acoustic prior, not human rating averages, so compare tracks within one run rather than ' +
+          'Before every analysis, searches online for creation background and lyrics, excluding song reviews/comments. ' +
+          'Search failure stops analysis; online text is for interpretation only, not the acoustic score. ' +
+          'Values are relative coordinates from an acoustic prior, not human rating averages, so compare tracks ' +
+          'within one run rather than ' +
           'quoting absolute numbers. When analysing epic or orchestral tracks, do not truncate with ' +
           'max_seconds: a quiet intro can hide the grandeur that defines the emotion.',
         parameters: {
@@ -366,6 +383,10 @@ export function apply(ctx, config = {}) {
               description:
                 'Include raw acoustic features and the per-axis contributing parts (default false).',
             },
+            include_axes_v2: {
+              type: 'boolean',
+              description: 'Also compute 12 independent acoustic axes over the full analyzed audio (default false). These 0..1 diagnostics do not replace the original four-axis score.',
+            },
           },
           required: ['path'],
           additionalProperties: false,
@@ -394,28 +415,37 @@ export function apply(ctx, config = {}) {
             })
           }
 
+          const lookup = await requireResearch(ctx, input.path, exec?.signal)
+          if (!lookup.ok) return fail(lookup)
+
           const argv = ['analyze', '--path', input.path]
           if (Number.isFinite(input.segment_sec)) argv.push('--segment-sec', String(input.segment_sec))
           if (Number.isFinite(input.hop_sec)) argv.push('--hop-sec', String(input.hop_sec))
           if (Number.isFinite(input.max_seconds)) argv.push('--max-seconds', String(input.max_seconds))
+          if (input.include_axes_v2 === true) argv.push('--axes-v2')
 
           const fields = input.include_evidence
-            ? RESULT_FIELDS
-            : ['emotion', 'emotion_4d', 'texture', 'grandeur', 'arc', 'quality', 'clip', 'deltas']
+            ? [...RESULT_FIELDS]
+            : ['emotion', 'emotion_4d', 'texture', 'grandeur', 'arc', 'quality', 'clip', 'deltas', 'warnings']
           // `--fields` also filters `segments`; asking for the timeline without
           // requesting the field makes the analyzer omit it and the caller gets
           // an empty array that looks like "no timeline".
           if (input.include_segments && !fields.includes('segments')) fields.push('segments')
+          if (input.include_axes_v2 === true) fields.push('axes_v2')
           argv.push('--fields', fields.join(','))
           if (!input.include_segments) argv.push('--no-segments')
 
           const result = await runAnalyzer(ctx, cfg, argv, { signal: exec?.signal })
           if (!result.ok) return fail(result)
 
-          const value = summarizeAnalysis(result.data, {
-            includeSegments: Boolean(input.include_segments),
-            includeEvidence: Boolean(input.include_evidence),
-          })
+          const value = {
+            ...summarizeAnalysis(result.data, {
+              includeSegments: Boolean(input.include_segments),
+              includeEvidence: Boolean(input.include_evidence),
+              includeAxesV2: input.include_axes_v2 === true,
+            }),
+            research: lookup.data,
+          }
           return {
             isError: false,
             value,
@@ -432,7 +462,9 @@ export function apply(ctx, config = {}) {
           'Analyze every audio file under a directory, appending one JSON record per track to a JSONL file. ' +
           'Resumable: re-running skips tracks that already succeeded and retries the failed ones, so a long ' +
           'run survives interruption. Progress is not returned; the returned value is the final summary. ' +
-          'Use this instead of calling analyze_music_emotion in a loop.',
+          'Use this instead of calling analyze_music_emotion in a loop. Before processing, ' +
+          'searches creation background and lyrics online for every pending track; never searches song reviews/comments. ' +
+          'At most 50 tracks per invocation; web failure stops the batch before analysis.',
         parameters: {
           type: 'object',
           properties: {
@@ -442,7 +474,7 @@ export function apply(ctx, config = {}) {
             },
             out: {
               type: 'string',
-              description: 'JSONL output path. Defaults to moodio_batch.jsonl in the current directory.',
+              description: 'JSONL output path. Defaults to moodio_batch.jsonl in the Host process working directory; pass an absolute path for predictable placement.',
             },
             workers: {
               type: 'integer',
@@ -450,7 +482,7 @@ export function apply(ctx, config = {}) {
             },
             limit: {
               type: 'integer',
-              description: 'Process only the first N pending tracks (0 = all). Use for a trial run.',
+              description: 'Process only the first N pending tracks (0 = all; max 50 per call because each track needs two web searches).',
             },
             segment_sec: { type: 'number', description: 'Window length in seconds (default 10).' },
             hop_sec: { type: 'number', description: 'Window step in seconds (default 10).' },
@@ -461,6 +493,10 @@ export function apply(ctx, config = {}) {
             timeout_ms: {
               type: 'number',
               description: 'Override the batch timeout for this call. Large libraries need a big value.',
+            },
+            include_axes_v2: {
+              type: 'boolean',
+              description: 'Add independent 12-axis diagnostics over the full analyzed audio to each record (default false).',
             },
             no_resume: {
               type: 'boolean',
@@ -491,13 +527,41 @@ export function apply(ctx, config = {}) {
           }
 
           const argv = ['batch', '--path', input.path, '--quiet']
-          if (typeof input.out === 'string' && input.out.trim()) argv.push('--out', input.out)
+          // 显式传输出路径，避免子进程 cwd=projectDir 时写入插件的 python/ 目录。
+          const outName = typeof input.out === 'string' && input.out.trim()
+            ? input.out : 'moodio_batch.jsonl'
+          argv.push('--out', path.resolve(process.cwd(), outName))
           if (Number.isFinite(input.workers)) argv.push('--workers', String(input.workers))
           if (Number.isFinite(input.limit)) argv.push('--limit', String(input.limit))
           if (Number.isFinite(input.segment_sec)) argv.push('--segment-sec', String(input.segment_sec))
           if (Number.isFinite(input.hop_sec)) argv.push('--hop-sec', String(input.hop_sec))
           if (Number.isFinite(input.max_seconds)) argv.push('--max-seconds', String(input.max_seconds))
           if (input.no_resume === true) argv.push('--no-resume')
+          if (input.include_axes_v2 === true) argv.push('--axes-v2')
+
+          const listing = await runAnalyzer(ctx, cfg, [...argv, '--list-only'], { signal: exec?.signal })
+          if (!listing.ok) return fail(listing)
+          const pending = listing.data?.pending
+          if (!Array.isArray(pending) || !pending.every((p) => typeof p === 'string')) {
+            return fail({ code: 'BATCH_PREFLIGHT_FAILED', message: 'analyzer returned an invalid pending-song list' })
+          }
+          if (pending.length === 0) {
+            return fail({ code: 'NO_PENDING_AUDIO', message: 'no pending audio tracks to research and analyze' })
+          }
+          if (pending.length > 50) {
+            return fail({
+              code: 'BATCH_RESEARCH_LIMIT',
+              message: `${pending.length} tracks need online research; maximum is 50 per invocation`,
+              suggestion: 'Pass limit: 50 and resume until the directory is complete.',
+            })
+          }
+          const researchByTrack = []
+          for (const rel of pending) {
+            const lookup = await requireResearch(ctx, path.join(input.path, ...rel.split('/')), exec?.signal)
+            if (!lookup.ok) return fail({ ...lookup, message: `${rel}: ${lookup.message}` })
+            researchByTrack.push({ path: rel, ...lookup.data })
+          }
+          argv.push('--preflight-files', JSON.stringify(pending))
 
           const result = await runAnalyzer(ctx, cfg, argv, {
             timeoutMs: Number.isFinite(input.timeout_ms) ? input.timeout_ms : cfg.defaultTimeoutMs,
@@ -506,7 +570,7 @@ export function apply(ctx, config = {}) {
           if (!result.ok) return fail(result)
 
           // Drop the CLI's agent-context tail; it is noise inside a tool result.
-          const value = { ...result.data }
+          const value = { ...result.data, research_by_track: researchByTrack }
           delete value.skills
           delete value.issue
 
@@ -515,6 +579,72 @@ export function apply(ctx, config = {}) {
             value,
             content: [{ type: 'text', text: JSON.stringify(value, null, 2) }],
           }
+        },
+      }),
+    )
+
+    disposers.push(
+      ctx.tools.register({
+        name: 'transcribe_music_lyrics',
+        description:
+          'Transcribe sung words from a local audio file with an optional faster-whisper model. ' +
+          'The ASR model must be local and is never downloaded; every call first searches online for ' +
+          'creation background and lyrics, excluding song reviews/comments. ' +
+          'This is an ASR guess from the mixed recording, not verified lyrics; vocals buried in music ' +
+          'may be missed or hallucinated. Lyrics do not change the acoustic emotion score.',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: { type: 'string', description: 'Absolute path to the song/audio file.' },
+            model_dir: {
+              type: 'string',
+              description: 'Local faster-whisper model directory containing model.bin; alternatively set MOODIO_LYRICS_MODEL_DIR.',
+            },
+            language: {
+              type: 'string',
+              description: 'Optional language code (e.g. en or zh); omit to auto-detect.',
+            },
+            device: {
+              type: 'string', enum: ['cpu', 'cuda'],
+              description: 'Inference device (default cpu).',
+            },
+            timeout_ms: {
+              type: 'number',
+              description: 'Override the default 10-minute tool timeout for long songs or slow CPUs.',
+            },
+          },
+          required: ['path'],
+          additionalProperties: false,
+        },
+        output: {
+          schema: { type: 'object', additionalProperties: true },
+          render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
+        },
+        async execute(args, exec) {
+          const input = args ?? {}
+          if (typeof input.path !== 'string' || !input.path.trim()) {
+            return fail({
+              code: 'INVALID_ARGUMENT', message: 'path is required',
+              suggestion: 'Pass an absolute path to an audio file.',
+            })
+          }
+          const lookup = await requireResearch(ctx, input.path, exec?.signal)
+          if (!lookup.ok) return fail(lookup)
+          const argv = ['lyrics', '--path', input.path]
+          if (typeof input.model_dir === 'string' && input.model_dir.trim()) {
+            argv.push('--model-dir', input.model_dir)
+          }
+          if (typeof input.language === 'string' && input.language.trim()) {
+            argv.push('--language', input.language)
+          }
+          if (input.device === 'cpu' || input.device === 'cuda') argv.push('--device', input.device)
+          const result = await runAnalyzer(ctx, cfg, argv, {
+            timeoutMs: Number.isFinite(input.timeout_ms) ? input.timeout_ms : cfg.defaultTimeoutMs,
+            signal: exec?.signal,
+          })
+          if (!result.ok) return fail(result)
+          const value = { ...result.data, research: lookup.data }
+          return { isError: false, value, content: [{ type: 'text', text: JSON.stringify(value, null, 2) }] }
         },
       }),
     )

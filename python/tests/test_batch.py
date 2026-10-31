@@ -108,6 +108,86 @@ def test_analyze_one_error_is_captured() -> bool:
     return ok
 
 
+def test_cli_defaults_and_invalid_limit() -> bool:
+    print("\n[t6] CLI 默认时间窗与负 limit 校验")
+    from moodio import CliError, build_parser, cmd_batch
+
+    parser = build_parser()
+    analyze = parser.parse_args(["analyze", "--path", __file__])
+    batch = parser.parse_args(["batch", "--path", os.path.dirname(__file__)])
+    ok = _check("analyze 默认 10s/10s", (analyze.segment_sec, analyze.hop_sec) == (10.0, 10.0))
+    ok &= _check("batch 默认 10s/10s", (batch.segment_sec, batch.hop_sec) == (10.0, 10.0))
+
+    batch.limit = -1
+    try:
+        cmd_batch(batch)
+    except CliError as exc:
+        ok &= _check("负 limit 返回参数错误", exc.code == "INVALID_ARGUMENT" and exc.exit_code == 2)
+    else:
+        ok &= _check("负 limit 返回参数错误", False)
+    return ok
+
+
+def test_human_fields_does_not_crash() -> bool:
+    print("\n[t7] --human 配合 --fields 不丢失必需数据")
+    import io
+    from contextlib import redirect_stdout
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from moodio import build_parser, cmd_analyze
+
+    payload = {
+        "emotion": {"emotion": "悲伤", "valence": -0.2, "arousal": -0.1},
+        "clip": {"path": __file__, "duration_sec": 12.0},
+        "quality": {"confidence": 0.5},
+        "emotion_4d": {},
+        "arc": "stable",
+    }
+    args = build_parser().parse_args([
+        "analyze", "--path", __file__, "--human", "--fields", "arc",
+    ])
+    output = io.StringIO()
+    fake_report = SimpleNamespace(to_dict=lambda **_kwargs: payload)
+    with patch("music_emotion.pipeline.analyze_file", return_value=fake_report):
+        with redirect_stdout(output):
+            code = cmd_analyze(args)
+    return _check("仍输出完整情绪坐标", code == 0 and "valence -0.20" in output.getvalue())
+
+
+def test_online_preflight_matches_pending_tracks() -> bool:
+    print("\n[t8] 批量联网清单与实际处理曲目一致")
+    from music_emotion.batch import pending_audio, run_batch
+
+    with tempfile.TemporaryDirectory() as td:
+        root = os.path.join(td, "songs")
+        os.makedirs(root)
+        for name in ("a.mp3", "b.mp3"):
+            with open(os.path.join(root, name), "wb") as fh:
+                fh.write(b"x")
+        out = os.path.join(td, "out.jsonl")
+        with open(out, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"path": "a.mp3", "error": None}) + "\n")
+        ok = _check("续跑只列出未分析曲目", pending_audio(root, out)["pending"] == ["b.mp3"])
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from moodio import main as moodio_main
+        stream = StringIO()
+        with redirect_stdout(stream):
+            listed_code = moodio_main(["batch", "--path", root, "--out", out, "--list-only"])
+        ok &= _check("CLI 只列出同一批待处理歌曲",
+                     listed_code == 0 and json.loads(stream.getvalue())["pending"] == ["b.mp3"])
+        try:
+            run_batch(root, out, workers=1, resume=False, preflight_files=["wrong.mp3"])
+        except ValueError as exc:
+            ok &= _check("曲目集合变化时拒绝分析", "preflight" in str(exc).lower())
+        else:
+            ok &= _check("曲目集合变化时拒绝分析", False)
+        with open(out, "r", encoding="utf-8") as fh:
+            ok &= _check("拒绝时不清除原结果", "a.mp3" in fh.read())
+    return ok
+
+
 def main() -> int:
     print("=" * 66)
     print("批量执行器行为测试")
@@ -118,6 +198,9 @@ def main() -> int:
         test_load_done_ignores_failures(),
         test_scan_is_ordered_and_filtered(),
         test_analyze_one_error_is_captured(),
+        test_cli_defaults_and_invalid_limit(),
+        test_human_fields_does_not_crash(),
+        test_online_preflight_matches_pending_tracks(),
     ]
     passed = sum(bool(r) for r in results)
     print("\n" + "=" * 66)

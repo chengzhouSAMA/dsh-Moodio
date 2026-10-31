@@ -11,10 +11,33 @@ from . import arc as arc_mod
 from .audio_io import ANALYSIS_SR, load_audio
 from .features import extract_features
 from .neural import NeuralProfiler
-from .types import ClipInfo, EmotionReport, SegmentEmotion
+from .types import ClipInfo, EmotionReport, MusicEmotionError, SegmentEmotion
 from .vamodel import estimate_va, explain
 
 __all__ = ["analyze_file", "analyze_waveform"]
+
+
+def _analyze_axes_v2(y: np.ndarray, sr: int) -> Dict[str, Any]:
+    """对全部已加载音频计算独立十二轴，不做隐式时长截断。"""
+    from . import axes_v2 as axes_mod
+
+    audio = y
+    if sr != axes_mod.SR:
+        import librosa
+        audio = librosa.resample(y, orig_sr=sr, target_sr=axes_mod.SR)
+    if len(audio) < 3 * axes_mod.SR:
+        raise MusicEmotionError(
+            "AXES_V2_TOO_SHORT", "12-axis analysis needs at least three seconds of audio",
+            "disable --axes-v2 for very short clips",
+        )
+    features, segments = axes_mod.extract(audio)
+    return {
+        "axes": axes_mod.score(features, segments, axes_mod.DEFAULT_RANGES),
+        "seconds_analyzed": round(len(audio) / axes_mod.SR, 1),
+        "sampling": "full_analyzed_audio",
+        "scale": "[0,1] acoustic diagnostics; not human ratings",
+        "note": "independent 12-axis prior over the entire analyzed audio; not interchangeable with four-axis emotion scores",
+    }
 
 
 def analyze_waveform(
@@ -25,6 +48,7 @@ def analyze_waveform(
     hop_sec: float = 1.0,
     with_neural: bool = False,
     neural_model_dir: Optional[str] = None,
+    with_axes_v2: bool = False,
 ) -> EmotionReport:
     """对已加载的波形做完整分析。"""
     t0 = time.time()
@@ -49,6 +73,8 @@ def analyze_waveform(
         global_va["valence"], global_va["arousal"],
         global_tex["texture"], global_gran["grandeur"],
     )
+
+    axes_v2 = _analyze_axes_v2(y, sr) if with_axes_v2 else None
 
     segments = []
     for seg in raw["segments"]:
@@ -124,6 +150,7 @@ def analyze_waveform(
         texture=global_tex,
         grandeur=global_gran,
         four_axis=four,
+        axes_v2=axes_v2,
     )
 
 
@@ -135,6 +162,7 @@ def analyze_file(
     hop_sec: float = 1.0,
     with_neural: bool = False,
     neural_model_dir: Optional[str] = None,
+    with_axes_v2: bool = False,
 ) -> EmotionReport:
     """从文件路径走完整流程。"""
     y, sr, clip = load_audio(path, sr=sr, max_seconds=max_seconds)
@@ -149,6 +177,7 @@ def analyze_file(
         hop_sec=hop_sec,
         with_neural=with_neural,
         neural_model_dir=neural_model_dir,
+        with_axes_v2=with_axes_v2,
     )
 
 

@@ -19,7 +19,7 @@ os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
 
 # ---------------------------------------------------------------- 约定
 
-VERSION = "1.0.0"
+VERSION = "2.2.0"
 AGENT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent")
 
 EXIT_OK = 0
@@ -139,9 +139,9 @@ def cmd_analyze(args: argparse.Namespace) -> int:
     from music_emotion.types import MusicEmotionError
 
     if args.segment_sec <= 0:
-        raise CliError("INVALID_ARGUMENT", "--segment-sec must be > 0", "try --segment-sec 5", EXIT_USAGE)
+        raise CliError("INVALID_ARGUMENT", "--segment-sec must be > 0", "try --segment-sec 10", EXIT_USAGE)
     if args.hop_sec <= 0:
-        raise CliError("INVALID_ARGUMENT", "--hop-sec must be > 0", "try --hop-sec 1", EXIT_USAGE)
+        raise CliError("INVALID_ARGUMENT", "--hop-sec must be > 0", "try --hop-sec 10", EXIT_USAGE)
     if not os.path.exists(args.path):
         raise CliError(
             "FILE_NOT_FOUND",
@@ -162,12 +162,15 @@ def cmd_analyze(args: argparse.Namespace) -> int:
             hop_sec=args.hop_sec,
             with_neural=bool(args.neural) and not args.no_neural,
             neural_model_dir=args.neural_model_dir,
+            with_axes_v2=bool(args.axes_v2),
         )
     except MusicEmotionError as exc:
         raise CliError(exc.code, exc.message, exc.suggestion) from exc
 
     payload = report.to_dict(include_segments=not args.no_segments)
-    if wanted:
+    # --human 走完整报告：字段裁剪只服务 agent 模式，否则 _print_human 会
+    # 拿到被裁掉的 None（如 emo['valence']）并在格式化时炸成 INTERNAL_ERROR。
+    if wanted and not args.human:
         # 用 "取值 + 补空" 而不是直接下标：`warnings`、`neural` 这类键在"没有内容"时
         # 根本不会出现在 payload 里，直接下标会抛 KeyError 并被顶层兜底成 INTERNAL_ERROR
         # —— 用户只是多问了一个合法字段，却收到"内部错误"。缺失时补明确的空值，
@@ -187,7 +190,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
 def cmd_batch(args: argparse.Namespace) -> int:
     """批量分析整个目录，断点续跑，逐条追加写入 JSONL。"""
-    from music_emotion.batch import run_batch
+    from music_emotion.batch import pending_audio, run_batch
 
     if not os.path.isdir(args.path):
         if os.path.exists(args.path):
@@ -204,13 +207,27 @@ def cmd_batch(args: argparse.Namespace) -> int:
             EXIT_NOT_FOUND,
         )
     if args.segment_sec <= 0:
-        raise CliError("INVALID_ARGUMENT", "--segment-sec must be > 0", "try --segment-sec 5", EXIT_USAGE)
+        raise CliError("INVALID_ARGUMENT", "--segment-sec must be > 0", "try --segment-sec 10", EXIT_USAGE)
     if args.hop_sec <= 0:
-        raise CliError("INVALID_ARGUMENT", "--hop-sec must be > 0", "try --hop-sec 1", EXIT_USAGE)
+        raise CliError("INVALID_ARGUMENT", "--hop-sec must be > 0", "try --hop-sec 10", EXIT_USAGE)
     if args.workers < 1:
         raise CliError("INVALID_ARGUMENT", "--workers must be >= 1", "try --workers 4", EXIT_USAGE)
+    if args.limit < 0:
+        # 负 limit 会让 todo[:limit] 静默丢掉尾部曲目，必须在这里拦住。
+        raise CliError("INVALID_ARGUMENT", "--limit must be >= 0", "0 means all pending tracks", EXIT_USAGE)
 
     out_path = args.out or os.path.join(os.getcwd(), "moodio_batch.jsonl")
+    if args.list_only:
+        _print_json(pending_audio(args.path, out_path, limit=args.limit, resume=not args.no_resume))
+        return EXIT_OK
+    preflight_files = None
+    if args.preflight_files:
+        try:
+            preflight_files = json.loads(args.preflight_files)
+        except json.JSONDecodeError as exc:
+            raise CliError("INVALID_ARGUMENT", "--preflight-files must be a JSON array", exit_code=EXIT_USAGE) from exc
+        if not isinstance(preflight_files, list) or not all(isinstance(p, str) for p in preflight_files):
+            raise CliError("INVALID_ARGUMENT", "--preflight-files must be an array of paths", exit_code=EXIT_USAGE)
 
     def _log(msg: str) -> None:
         # 进度一律走 stderr：stdout 只留最终汇总 JSON，agent 才能安全重定向
@@ -231,14 +248,41 @@ def cmd_batch(args: argparse.Namespace) -> int:
             neural_model_dir=args.neural_model_dir,
             resume=not args.no_resume,
             log=_log,
+            preflight_files=preflight_files,
+            with_axes_v2=bool(args.axes_v2),
         )
     except FileNotFoundError as exc:
         raise CliError("DIR_NOT_FOUND", str(exc), "check --path", EXIT_NOT_FOUND) from exc
+    except ValueError as exc:
+        raise CliError("BATCH_PREFLIGHT_CHANGED", str(exc), "retry the lookup before batch analysis", EXIT_CONFLICT) from exc
 
     summary.update(_agent_context())
     _print_json(summary)
     # 有失败项时不要假装全成功：非零退出码 + 失败明细已在 JSON 里
     return EXIT_OK if summary.get("failed", 0) == 0 else EXIT_GENERAL
+
+
+# ---------------------------------------------------------------- lyrics
+
+def cmd_lyrics(args: argparse.Namespace) -> int:
+    """仅在显式调用时用本地模型猜测唱词，不改变声学情绪模型。"""
+    from music_emotion.lyrics import transcribe_lyrics
+    from music_emotion.types import MusicEmotionError
+
+    try:
+        result = transcribe_lyrics(
+            args.path, model_dir=args.model_dir, language=args.language, device=args.device,
+        )
+    except MusicEmotionError as exc:
+        if exc.code in ("FILE_NOT_FOUND", "LYRICS_MODEL_NOT_FOUND"):
+            exit_code = EXIT_NOT_FOUND
+        elif exc.code == "INVALID_ARGUMENT":
+            exit_code = EXIT_USAGE
+        else:
+            exit_code = EXIT_GENERAL
+        raise CliError(exc.code, exc.message, exc.suggestion, exit_code) from exc
+    _print_json(result)
+    return EXIT_OK
 
 
 # ---------------------------------------------------------------- report
@@ -298,7 +342,7 @@ def cmd_report(args: argparse.Namespace) -> int:
 #: 合法顶层字段，用于参数预校验。
 _TOP_FIELDS = (
     "arc", "clip", "deltas", "emotion", "emotion_4d", "texture", "grandeur",
-    "features", "modes", "neural", "quality", "schema_version",
+    "features", "modes", "neural", "quality", "schema_version", "axes_v2",
     "segments", "warnings",
 )
 
@@ -376,7 +420,9 @@ def cmd_help(args: argparse.Namespace) -> int:
             "name": "moodio",
             "version": VERSION,
             "summary": "Music emotion (valence/arousal) analysis for agents.",
-            "usage": "moodio analyze --path <audio> [options] | moodio batch --path <dir> [options]",
+            "usage": ("moodio analyze --path <audio> [options] | "
+                      "moodio lyrics --path <audio> --model-dir <local-model> [options] | "
+                      "moodio batch --path <dir> [options]"),
             "output_mode": "JSON by default; --human for readable text",
             "exit_codes": {
                 "0": "success",
@@ -406,11 +452,13 @@ def _command_specs() -> List[Dict[str, Any]]:
                 {"name": "path", "flag": "--path", "type": "string", "required": True,
                  "description": "audio file path (mp3/flac/wav/ogg/aiff)"},
                 {"name": "segment_sec", "flag": "--segment-sec", "type": "number", "required": False,
-                 "default": 5.0, "description": "segment length in seconds"},
+                 "default": 10.0, "description": "segment length in seconds"},
                 {"name": "hop_sec", "flag": "--hop-sec", "type": "number", "required": False,
-                 "default": 1.0, "description": "segment hop in seconds"},
+                 "default": 10.0, "description": "segment hop in seconds"},
                 {"name": "max_seconds", "flag": "--max-seconds", "type": "number", "required": False,
                  "default": 0, "description": "analyze only the first N seconds (0 = all)"},
+                {"name": "axes_v2", "flag": "--axes-v2", "type": "boolean", "required": False,
+                 "description": "add independent 12-axis diagnostics over the full analyzed audio"},
                 {"name": "no_neural", "flag": "--no-neural", "type": "boolean", "required": False,
                  "description": "skip the wav2small neural sidecar"},
                 {"name": "no_segments", "flag": "--no-segments", "type": "boolean", "required": False,
@@ -438,10 +486,26 @@ def _command_specs() -> List[Dict[str, Any]]:
                  "default": 0, "description": "only process the first N pending tracks"},
                 {"name": "max_seconds", "flag": "--max-seconds", "type": "number", "required": False,
                  "default": 0, "description": "analyze only the first N seconds per track"},
+                {"name": "axes_v2", "flag": "--axes-v2", "type": "boolean", "required": False,
+                 "description": "add independent 12-axis diagnostics to each record"},
                 {"name": "no_resume", "flag": "--no-resume", "type": "boolean", "required": False,
                  "description": "discard previous results and start from scratch"},
                 {"name": "quiet", "flag": "--quiet", "type": "boolean", "required": False,
                  "description": "suppress progress output on stderr"},
+            ],
+        },
+        {
+            "name": "lyrics",
+            "description": "Transcribe singing from a local audio file; estimates may differ from official lyrics.",
+            "parameters": [
+                {"name": "path", "flag": "--path", "type": "string", "required": True,
+                 "description": "audio file path"},
+                {"name": "model_dir", "flag": "--model-dir", "type": "string", "required": False,
+                 "description": "local model directory containing model.bin; or set MOODIO_LYRICS_MODEL_DIR"},
+                {"name": "language", "flag": "--language", "type": "string", "required": False,
+                 "description": "language code, or omit to auto-detect"},
+                {"name": "device", "flag": "--device", "type": "string", "required": False,
+                 "enum": ["cpu", "cuda"], "default": "cpu"},
             ],
         },
         {
@@ -598,9 +662,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     a = sub.add_parser("analyze", add_help=False)
     a.add_argument("--path", required=True)
-    a.add_argument("--segment-sec", type=float, default=5.0)
-    a.add_argument("--hop-sec", type=float, default=1.0)
+    # 10s 窗口/步长与工具描述、README 一致；需要更细的时间线可显式传参。
+    a.add_argument("--segment-sec", type=float, default=10.0)
+    a.add_argument("--hop-sec", type=float, default=10.0)
     a.add_argument("--max-seconds", type=float, default=0.0)
+    a.add_argument("--axes-v2", action="store_true", help="append optional 12-axis full-audio diagnostics")
     a.add_argument("--no-neural", action="store_true", help="kept for compatibility; neural is off by default")
     a.add_argument("--neural", action="store_true", help="also run the wav2small sidecar")
     a.add_argument("--no-segments", action="store_true")
@@ -608,6 +674,12 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--fields", default="")
     a.add_argument("--human", action="store_true")
     a.add_argument("--agent", action="store_true")
+
+    ly = sub.add_parser("lyrics", add_help=False)
+    ly.add_argument("--path", required=True)
+    ly.add_argument("--model-dir", default=None)
+    ly.add_argument("--language", default=None)
+    ly.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
 
     s = sub.add_parser("skills", add_help=False)
     s.add_argument("name", nargs="?", default="")
@@ -626,15 +698,19 @@ def build_parser() -> argparse.ArgumentParser:
     bt.add_argument("--path", required=True)
     bt.add_argument("--out", default="")
     bt.add_argument("--workers", type=int, default=4)
+    # limit 必须显式校验：todo[:limit] 对负数会静默丢尾部曲目。
     bt.add_argument("--limit", type=int, default=0)
-    bt.add_argument("--segment-sec", type=float, default=5.0)
-    bt.add_argument("--hop-sec", type=float, default=1.0)
+    bt.add_argument("--segment-sec", type=float, default=10.0)
+    bt.add_argument("--hop-sec", type=float, default=10.0)
     bt.add_argument("--max-seconds", type=float, default=0.0)
+    bt.add_argument("--axes-v2", action="store_true")
     bt.add_argument("--no-neural", action="store_true",
                     help="kept for compatibility; neural is off by default")
     bt.add_argument("--neural", action="store_true", help="also run the wav2small sidecar")
     bt.add_argument("--neural-model-dir", default=None)
     bt.add_argument("--no-resume", action="store_true")
+    bt.add_argument("--list-only", action="store_true")
+    bt.add_argument("--preflight-files", default="")
     bt.add_argument("--quiet", action="store_true")
     bt.add_argument("--human", action="store_true")
     bt.add_argument("--agent", action="store_true")
@@ -673,6 +749,8 @@ def main(argv: List[str] | None = None) -> int:
             return cmd_analyze(args)
         if command == "batch":
             return cmd_batch(args)
+        if command == "lyrics":
+            return cmd_lyrics(args)
         if command == "report":
             return cmd_report(args)
         if command == "skills":

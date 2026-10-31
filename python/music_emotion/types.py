@@ -113,6 +113,8 @@ class EmotionReport:
     grandeur: Optional[Dict[str, Any]] = None
     #: 四轴组合后的日常说法：{"emotion": 悲壮/悲伤/昂扬..., ...}
     four_axis: Optional[Dict[str, Any]] = None
+    #: 可选的十二轴诊断：与四轴评分使用独立量纲和归一范围。
+    axes_v2: Optional[Dict[str, Any]] = None
 
     def to_dict(self, include_segments: bool = True) -> Dict[str, Any]:
         # 离散情绪词由同一组 global V/A 派生，保证与 emotion.valence/arousal 永不矛盾。
@@ -152,6 +154,8 @@ class EmotionReport:
             payload["texture"] = self.texture
         if self.grandeur is not None:
             payload["grandeur"] = self.grandeur
+        if self.axes_v2 is not None:
+            payload["axes_v2"] = self.axes_v2
         if include_segments:
             payload["segments"] = [s.to_dict() for s in self.segments]
         else:

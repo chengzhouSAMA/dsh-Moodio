@@ -63,10 +63,15 @@ function fakeHandle({ stdout = '', stderr = '', exitCode = 0, lossyStdout = fals
  * Build a stub ctx. `spawnImpl` decides what each run returns, and `onSpawn`
  * records the argv so we can assert on how the command was assembled.
  */
-function makeCtx({ spawnImpl, config = {}, onSpawn } = {}) {
+function makeCtx({ spawnImpl, config = {}, onSpawn, searchImpl, listImpl } = {}) {
   const registered = new Map()
   const disposers = []
   const ctx = {
+    web: {
+      search(request, signal) {
+        return searchImpl ? searchImpl(request, signal) : Promise.resolve({ sources: [] })
+      },
+    },
     tools: {
       register(definition) {
         assert.ok(definition.name, 'tool must have a name')
@@ -89,6 +94,9 @@ function makeCtx({ spawnImpl, config = {}, onSpawn } = {}) {
     subprocess: {
       spawn(spec) {
         if (onSpawn) onSpawn(spec)
+        if (spec.argv.includes('--list-only')) {
+          return listImpl ? listImpl(spec) : fakeHandle({ stdout: JSON.stringify({ pending: ['song.mp3'] }) })
+        }
         if (spawnImpl) return spawnImpl(spec)
         return fakeHandle()
       },
@@ -120,10 +128,11 @@ console.log('='.repeat(62))
 // ---------------------------------------------------------------- metadata
 console.log('\n[t1] module surface')
 check('exports name', () => assert.equal(name, 'music-emotion'))
-check('injects tools and subprocess', () => {
+check('injects tools, subprocess and web', () => {
   assert.ok(Array.isArray(inject))
   assert.ok(inject.includes('tools'))
   assert.ok(inject.includes('subprocess'))
+  assert.ok(inject.includes('web'))
 })
 check('apply is a function', () => assert.equal(typeof apply, 'function'))
 
@@ -131,9 +140,15 @@ check('apply is a function', () => assert.equal(typeof apply, 'function'))
 console.log('\n[t2] tool registration')
 {
   const { registered } = makeCtx({ config: baseConfig })
-  check('registers both tools', () => {
+  check('registers three tools', () => {
     assert.ok(registered.has('analyze_music_emotion'))
     assert.ok(registered.has('batch_analyze_music'))
+    assert.ok(registered.has('transcribe_music_lyrics'))
+  })
+  check('lyrics require an audio path', () => {
+    const params = registered.get('transcribe_music_lyrics').parameters
+    assert.deepEqual(params.required, ['path'])
+    assert.equal(params.additionalProperties, false)
   })
   check('analyze requires path', () => {
     const params = registered.get('analyze_music_emotion').parameters
@@ -168,6 +183,49 @@ await checkAsync('passes argv array with CJK path intact', async () => {
   assert.ok(seen.argv.includes('--no-segments'), 'no-segments default')
 })
 
+await checkAsync('单曲在运行 Python 前每次联网检索两类资料', async () => {
+  const events = []
+  const { registered } = makeCtx({
+    config: baseConfig,
+    searchImpl: async (request) => {
+      events.push(request.query)
+      return { sources: request.query.includes('lyrics')
+        ? [{ url: 'https://lyrics.example/die-for-you', title: 'Die For You Lyrics' }]
+        : [{ url: 'https://playvalorant.com/music/die-for-you', title: 'Die For You Official Song' }] }
+    },
+    onSpawn: () => { events.push('python') },
+    spawnImpl: () => fakeHandle({ stdout: JSON.stringify({ emotion: {}, emotion_4d: {} }) }),
+  })
+  const result = await registered.get('analyze_music_emotion').execute({ path: 'D:\\私人\\Grabbitz - Die For You.mp3' }, {})
+  assert.equal(result.isError, false)
+  assert.equal(events.length, 3)
+  assert.equal(events.at(-1), 'python')
+  assert.ok(result.value.research?.background?.found)
+  assert.ok(result.value.research?.lyrics?.found)
+  assert.ok(events.slice(0, 2).every((q) => !q.includes('私人') && !/review|comment|评论/.test(q)))
+})
+
+await checkAsync('lyrics forwards local model and audio path as separate argv', async () => {
+  let seen
+  const searches = []
+  const { registered } = makeCtx({
+    config: baseConfig,
+    searchImpl: async (request) => { searches.push(request.query); return { sources: [] } },
+    onSpawn: (spec) => { seen = spec },
+    spawnImpl: () => fakeHandle({ stdout: JSON.stringify({ text: 'heard words', language: 'en', segments: [] }) }),
+  })
+  const track = 'C:\\歌曲\\a.mp3'
+  const model = 'D:\\models\\whisper-tiny'
+  const result = await registered.get('transcribe_music_lyrics').execute({ path: track, model_dir: model, language: 'en' }, {})
+  assert.equal(result.isError, false)
+  assert.equal(result.value.text, 'heard words')
+  assert.equal(seen.argv[seen.argv.indexOf('--path') + 1], track)
+  assert.equal(seen.argv[seen.argv.indexOf('--model-dir') + 1], model)
+  assert.equal(seen.argv[seen.argv.indexOf('--language') + 1], 'en')
+  assert.equal(searches.length, 2)
+  assert.ok(result.value.research?.lyrics)
+})
+
 console.log('\n[t4] field selection')
 await checkAsync('default fields omit raw features', async () => {
   let seen
@@ -181,6 +239,7 @@ await checkAsync('default fields omit raw features', async () => {
   await registered.get('analyze_music_emotion').execute({ path: 'x.mp3' }, {})
   const fields = seen.argv[seen.argv.indexOf('--fields') + 1]
   assert.ok(!fields.includes('features'), 'raw features should be opt-in')
+  assert.ok(fields.includes('warnings'), 'audio warnings must not be hidden')
   assert.ok(fields.includes('emotion_4d'), 'four-axis result must be requested')
 })
 
@@ -197,6 +256,24 @@ await checkAsync('include_evidence adds raw feature fields', async () => {
   const fields = seen.argv[seen.argv.indexOf('--fields') + 1]
   assert.ok(fields.includes('features'))
   assert.ok(fields.includes('modes'))
+})
+
+await checkAsync('十二轴仅在显式请求时随四轴一起返回', async () => {
+  let seen
+  const { registered } = makeCtx({
+    config: baseConfig,
+    onSpawn: (spec) => { seen = spec },
+    spawnImpl: () => fakeHandle({ stdout: JSON.stringify({
+      emotion: { valence: -0.1, arousal: 0.2 },
+      emotion_4d: { emotion: '强烈', texture: 0.6, grandeur: 0.4 },
+      axes_v2: { axes: { Energy: { value: 0.7 } }, sampling: 'middle_excerpt' },
+    }) }),
+  })
+  const result = await registered.get('analyze_music_emotion').execute({ path: 'x.mp3', include_axes_v2: true }, {})
+  assert.equal(result.value.emotion, '强烈')
+  assert.equal(result.value.axes_v2.axes.Energy.value, 0.7)
+  assert.ok(seen.argv.includes('--axes-v2'))
+  assert.ok(seen.argv[seen.argv.indexOf('--fields') + 1].includes('axes_v2'))
 })
 
 await checkAsync('include_segments requests the segments field', async () => {
@@ -236,6 +313,19 @@ await checkAsync('missing path argument is rejected without spawning', async () 
   assert.equal(spawned, false)
 })
 
+await checkAsync('联网失败时不启动本地声学分析', async () => {
+  let spawned = false
+  const { registered } = makeCtx({
+    config: baseConfig,
+    searchImpl: async () => { throw new Error('network down') },
+    spawnImpl: () => { spawned = true; return fakeHandle() },
+  })
+  const result = await registered.get('analyze_music_emotion').execute({ path: 'song.mp3' }, {})
+  assert.equal(result.isError, true)
+  assert.equal(result.value.code, 'WEB_RESEARCH_FAILED')
+  assert.equal(spawned, false)
+})
+
 await checkAsync('non-zero exit with structured stderr is surfaced', async () => {
   const payload = { error: true, code: 'FILE_NOT_FOUND', message: 'no such file', suggestion: 'check path' }
   const { registered } = makeCtx({
@@ -247,6 +337,26 @@ await checkAsync('non-zero exit with structured stderr is surfaced', async () =>
   assert.equal(result.value.code, 'FILE_NOT_FOUND')
   assert.equal(result.value.suggestion, 'check path')
   assert.equal(result.value.exitCode, 20)
+})
+
+await checkAsync('structured error survives an earlier noisy stderr line', async () => {
+  const payload = { error: true, code: 'BAD_AUDIO', message: 'cannot decode' }
+  const { registered } = makeCtx({
+    config: baseConfig,
+    spawnImpl: () => fakeHandle({ exitCode: 1, stderr: `decoder warning\n${JSON.stringify(payload)}\n` }),
+  })
+  const result = await registered.get('analyze_music_emotion').execute({ path: 'x.mp3' }, {})
+  assert.equal(result.value.code, 'BAD_AUDIO')
+})
+
+await checkAsync('structured error survives a log prefix on the same line', async () => {
+  const payload = { error: true, code: 'BAD_AUDIO', message: 'cannot decode' }
+  const { registered } = makeCtx({
+    config: baseConfig,
+    spawnImpl: () => fakeHandle({ exitCode: 1, stderr: `decoder warning ${JSON.stringify(payload)}\n` }),
+  })
+  const result = await registered.get('analyze_music_emotion').execute({ path: 'x.mp3' }, {})
+  assert.equal(result.value.code, 'BAD_AUDIO')
 })
 
 await checkAsync('non-zero exit without structured stderr still fails', async () => {
@@ -390,6 +500,37 @@ await checkAsync('surfaces grandeur_parts when the analyzer provides them', asyn
   assert.equal(result.value.texture_parts.spectral_flatness, 0.03)
 })
 
+await checkAsync('批量逐首检索后才执行分析，并固定检索过的曲目集合', async () => {
+  const events = []
+  const { registered } = makeCtx({
+    config: baseConfig,
+    listImpl: () => fakeHandle({ stdout: JSON.stringify({ pending: ['one.mp3', 'sub/two.flac'] }) }),
+    onSpawn: (spec) => events.push(spec.argv.includes('--list-only') ? 'list' : 'analyze'),
+    searchImpl: async (request) => { events.push(request.query); return { sources: [] } },
+    spawnImpl: () => fakeHandle({ stdout: JSON.stringify({ ok: 2, failed: 0 }) }),
+  })
+  const result = await registered.get('batch_analyze_music').execute({ path: 'D:\\private\\music', limit: 2 }, {})
+  assert.equal(result.isError, false)
+  assert.equal(events.length, 6)
+  assert.equal(events[0], 'list')
+  assert.equal(events.at(-1), 'analyze')
+  assert.ok(events.slice(1, -1).every((event) => !event.includes('private')))
+  assert.equal(result.value.research_by_track.length, 2)
+})
+
+await checkAsync('批量联网失败时不分析任何曲目', async () => {
+  let analyzed = false
+  const { registered } = makeCtx({
+    config: baseConfig,
+    searchImpl: async () => { throw new Error('offline') },
+    spawnImpl: () => { analyzed = true; return fakeHandle() },
+  })
+  const result = await registered.get('batch_analyze_music').execute({ path: 'D:\\music' }, {})
+  assert.equal(result.isError, true)
+  assert.equal(result.value.code, 'WEB_RESEARCH_FAILED')
+  assert.equal(analyzed, false)
+})
+
 await checkAsync('batch strips the CLI agent-context tail', async () => {
   const payload = {
     scanned: 794, processed: 782, ok: 782, failed: 0,
@@ -406,6 +547,17 @@ await checkAsync('batch strips the CLI agent-context tail', async () => {
   assert.ok(!('issue' in result.value), 'issue tail must be removed')
 })
 
+await checkAsync('批量十二轴开关仅在显式请求时传入 CLI', async () => {
+  let seen
+  const { registered } = makeCtx({
+    config: baseConfig,
+    onSpawn: (spec) => { if (!spec.argv.includes('--list-only')) seen = spec },
+    spawnImpl: () => fakeHandle({ stdout: JSON.stringify({ ok: 1, failed: 0 }) }),
+  })
+  await registered.get('batch_analyze_music').execute({ path: 'dir', include_axes_v2: true }, {})
+  assert.ok(seen.argv.includes('--axes-v2'))
+})
+
 await checkAsync('batch always passes --quiet so stdout stays pure', async () => {
   let seen
   const { registered } = makeCtx({
@@ -417,6 +569,20 @@ await checkAsync('batch always passes --quiet so stdout stays pure', async () =>
   })
   await registered.get('batch_analyze_music').execute({ path: 'dir' }, {})
   assert.ok(seen.argv.includes('--quiet'))
+})
+
+await checkAsync('batch output defaults to the host cwd, including relative paths', async () => {
+  let seen
+  const { registered } = makeCtx({
+    config: baseConfig,
+    onSpawn: (spec) => { seen = spec },
+    spawnImpl: () => fakeHandle({ stdout: JSON.stringify({ ok: 1, failed: 0 }) }),
+  })
+  const tool = registered.get('batch_analyze_music')
+  await tool.execute({ path: 'dir' }, {})
+  assert.equal(seen.argv[seen.argv.indexOf('--out') + 1], path.resolve(process.cwd(), 'moodio_batch.jsonl'))
+  await tool.execute({ path: 'dir', out: 'results/library.jsonl' }, {})
+  assert.equal(seen.argv[seen.argv.indexOf('--out') + 1], path.resolve(process.cwd(), 'results/library.jsonl'))
 })
 
 console.log('\n[t6b] render output carries the whole result')
@@ -483,7 +649,7 @@ check('no absolute author path is hard-coded in index.js', () => {
 console.log('\n[t8] disposal')
 check('effect returns a disposer that unregisters tools', () => {
   const { registered, disposers } = makeCtx({ config: baseConfig })
-  assert.equal(registered.size, 2)
+  assert.equal(registered.size, 3)
   assert.equal(disposers.length, 1)
   disposers[0]()
   assert.equal(registered.size, 0)
