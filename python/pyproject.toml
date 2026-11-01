@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "moodio"
-version = "2.2.1"
+version = "2.3.0"
 description = "Music understanding with 21-target instrument recognition, melody, 18 acoustic axes, and sourced context."
 readme = { text = "Local music analysis for agents: instrument candidates, melody evidence, eighteen acoustic axes, and sourced context through the Host plugin. See the repository README for model setup and limitations.", content-type = "text/plain" }
 requires-python = ">=3.9"

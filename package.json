@@ -1,6 +1,6 @@
 {
   "name": "dsh-moodio",
-  "version": "2.2.1",
+  "version": "2.3.0",
   "description": "Music understanding with 21-target instrument recognition, melody, 18 acoustic axes, and sourced context.",
   "keywords": [
     "dsh",
@@ -44,6 +44,8 @@
     "node": ">=18"
   },
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" }
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
   }
 }
