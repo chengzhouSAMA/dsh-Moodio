@@ -18,7 +18,13 @@ __all__ = ["analyze_file", "analyze_waveform"]
 
 
 def _analyze_axes_v2(y: np.ndarray, sr: int) -> Dict[str, Any]:
-    """对全部已加载音频计算独立十二轴，不做隐式时长截断。"""
+    """保留独立十二轴接口，供已有调用方使用。"""
+    return _analyze_axes(y, sr, with_axes_v2=True)["axes_v2"]
+
+
+def _analyze_axes(y: np.ndarray, sr: int, with_axes_v2: bool = False,
+                  with_axes_v3: bool = False) -> Dict[str, Dict[str, Any]]:
+    """一次提取，按请求返回十二轴和/或十八轴，不改变四轴。"""
     from . import axes_v2 as axes_mod
 
     audio = y
@@ -27,17 +33,34 @@ def _analyze_axes_v2(y: np.ndarray, sr: int) -> Dict[str, Any]:
         audio = librosa.resample(y, orig_sr=sr, target_sr=axes_mod.SR)
     if len(audio) < 3 * axes_mod.SR:
         raise MusicEmotionError(
-            "AXES_V2_TOO_SHORT", "12-axis analysis needs at least three seconds of audio",
-            "disable --axes-v2 for very short clips",
+            "AXES_V3_TOO_SHORT" if with_axes_v3 else "AXES_V2_TOO_SHORT",
+            "18-axis analysis needs at least three seconds of audio" if with_axes_v3
+            else "12-axis analysis needs at least three seconds of audio",
+            "disable --axes-v3 for very short clips" if with_axes_v3
+            else "disable --axes-v2 for very short clips",
         )
-    features, segments = axes_mod.extract(audio)
-    return {
-        "axes": axes_mod.score(features, segments, axes_mod.DEFAULT_RANGES),
+    features, segments = (axes_mod.extract(audio, extended=True) if with_axes_v3
+                          else axes_mod.extract(audio))
+    meta = {
         "seconds_analyzed": round(len(audio) / axes_mod.SR, 1),
         "sampling": "full_analyzed_audio",
         "scale": "[0,1] acoustic diagnostics; not human ratings",
-        "note": "independent 12-axis prior over the entire analyzed audio; not interchangeable with four-axis emotion scores",
     }
+    result = {}
+    if with_axes_v2:
+        result["axes_v2"] = {
+            **meta,
+            "axes": axes_mod.score(features, segments, axes_mod.DEFAULT_RANGES),
+            "note": "independent 12-axis prior over the entire analyzed audio; not interchangeable with four-axis emotion scores",
+        }
+    if with_axes_v3:
+        result["axes_v3"] = {
+            **meta,
+            "axes": axes_mod.score(features, segments, axes_mod.DEFAULT_RANGES, extended=True),
+            "axis_count": len(axes_mod.AXES_V3),
+            "note": "18-axis acoustic diagnostics; null means insufficient evidence, not a low score; no change to four-axis emotion",
+        }
+    return result
 
 
 def analyze_waveform(
@@ -49,6 +72,11 @@ def analyze_waveform(
     with_neural: bool = False,
     neural_model_dir: Optional[str] = None,
     with_axes_v2: bool = False,
+    with_axes_v3: bool = False,
+    with_melody: bool = False,
+    with_instruments: bool = False,
+    instrument_model_dir: Optional[str] = None,
+    instrument_device: str = "auto",
 ) -> EmotionReport:
     """对已加载的波形做完整分析。"""
     t0 = time.time()
@@ -74,7 +102,25 @@ def analyze_waveform(
         global_tex["texture"], global_gran["grandeur"],
     )
 
-    axes_v2 = _analyze_axes_v2(y, sr) if with_axes_v2 else None
+    if with_axes_v3 and not with_axes_v2 and len(y) < 3 * sr:
+        axis_payloads = {"axes_v3": {"status": "unavailable", "reason": "audio_too_short",
+                                      "axis_count": 18, "axes": {}, "seconds_analyzed": len(y) / sr}}
+        warnings.append("18-axis diagnostics need at least three seconds; other evidence is retained")
+    else:
+        axis_payloads = _analyze_axes(y, sr, with_axes_v2, with_axes_v3) if (with_axes_v2 or with_axes_v3) else {}
+    melody = None
+    if with_melody:
+        from .melody import analyze_melody
+        melody = analyze_melody(y, sr)
+        if melody["status"] != "candidate":
+            warnings.append("insufficient melody evidence; no phrase or repetition claims")
+
+    instruments = None
+    if with_instruments:
+        from .instruments import analyze_instruments
+        instruments = analyze_instruments(y, sr, instrument_model_dir, instrument_device)
+        if instruments["status"] == "unavailable":
+            warnings.append("instrument recognition unavailable; see instruments.reason and setup_command")
 
     segments = []
     for seg in raw["segments"]:
@@ -150,7 +196,10 @@ def analyze_waveform(
         texture=global_tex,
         grandeur=global_gran,
         four_axis=four,
-        axes_v2=axes_v2,
+        axes_v2=axis_payloads.get("axes_v2"),
+        axes_v3=axis_payloads.get("axes_v3"),
+        melody=melody,
+        instruments=instruments,
     )
 
 
@@ -163,6 +212,11 @@ def analyze_file(
     with_neural: bool = False,
     neural_model_dir: Optional[str] = None,
     with_axes_v2: bool = False,
+    with_axes_v3: bool = False,
+    with_melody: bool = False,
+    with_instruments: bool = False,
+    instrument_model_dir: Optional[str] = None,
+    instrument_device: str = "auto",
 ) -> EmotionReport:
     """从文件路径走完整流程。"""
     y, sr, clip = load_audio(path, sr=sr, max_seconds=max_seconds)
@@ -178,6 +232,11 @@ def analyze_file(
         with_neural=with_neural,
         neural_model_dir=neural_model_dir,
         with_axes_v2=with_axes_v2,
+        with_axes_v3=with_axes_v3,
+        with_melody=with_melody,
+        with_instruments=with_instruments,
+        instrument_model_dir=instrument_model_dir,
+        instrument_device=instrument_device,
     )
 
 

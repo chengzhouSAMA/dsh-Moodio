@@ -115,6 +115,12 @@ class EmotionReport:
     four_axis: Optional[Dict[str, Any]] = None
     #: 可选的十二轴诊断：与四轴评分使用独立量纲和归一范围。
     axes_v2: Optional[Dict[str, Any]] = None
+    #: 可选十八轴声学诊断；不可靠时单轴 value 为 null，不改变四轴情绪。
+    axes_v3: Optional[Dict[str, Any]] = None
+    #: 候选旋律音符、乐句、重复动机及附时间戳的 agent 说明。
+    melody: Optional[Dict[str, Any]] = None
+    #: 模型给出的多标签乐器候选及时间证据。
+    instruments: Optional[Dict[str, Any]] = None
 
     def to_dict(self, include_segments: bool = True) -> Dict[str, Any]:
         # 离散情绪词由同一组 global V/A 派生，保证与 emotion.valence/arousal 永不矛盾。
@@ -156,6 +162,12 @@ class EmotionReport:
             payload["grandeur"] = self.grandeur
         if self.axes_v2 is not None:
             payload["axes_v2"] = self.axes_v2
+        if self.axes_v3 is not None:
+            payload["axes_v3"] = self.axes_v3
+        if self.melody is not None:
+            payload["melody"] = self.melody
+        if self.instruments is not None:
+            payload["instruments"] = self.instruments
         if include_segments:
             payload["segments"] = [s.to_dict() for s in self.segments]
         else:
@@ -168,4 +180,7 @@ class EmotionReport:
             payload["neural"] = self.neural
         if self.warnings:
             payload["warnings"] = list(self.warnings)
+        if any(item is not None for item in (self.axes_v3, self.melody, self.instruments)):
+            from .assessment import build_music_analysis
+            payload["music_analysis"] = build_music_analysis(payload)
         return payload

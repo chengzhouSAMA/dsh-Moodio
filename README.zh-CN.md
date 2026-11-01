@@ -6,12 +6,39 @@
 
 给 agent 用的音乐情绪分析：量出来，不猜。
 
-四根轴——效价、唤醒、织体、规模——外加可选的十二轴声学诊断，全部在本地从波形算出。
-不训练、不要 API key、不下载模型权重。附一个 DSH Host 插件，agent 可以直接当工具调用。
+默认分析整首的乐器候选、旋律和十八轴，再结合创作背景与歌词来源，供 agent 综合解释音乐情感。
+声学计算不需要权重；乐器识别使用一次下载、本地运行的 CLAP + AST 模型，无需音频上传或模型 API key。
 
 [English](README.md) · [算法说明](docs/algorithm.md) · [更新日志](CHANGELOG.md) · [发布页](https://github.com/chengzhouSAMA/dsh-Moodio/releases)
 
 ## 输出什么
+
+`music_analysis` 汇总乐器、旋律、十八轴、背景/歌词来源及局限；综合情感结论由 agent
+依据这些证据形成，四轴词是声学起点，不是不可修正的最终结论。
+
+### 乐器识别
+
+目标目录共 21 类：古筝、二胡、琵琶、笛子、葫芦丝、唢呐、扬琴、笙、陶笛、古琴；
+钢琴、吉他、小提琴、萨克斯、架子鼓、大提琴、长笛、贝斯、尤克里里、口琴、手风琴。
+
+每十秒分析一个窗口，连续覆盖整首并保留末段。CLAP 给出候选相似度，AST 为已有监督
+类别提供交叉证据；次高相似度不直接当作共同存在的乐器。中国乐器中不少类别仅有
+家族或零样本支持，`verification_scope` 会明确标记。未知声音、相近音色和模型分歧
+不会伪装为确定结果。**目录覆盖不等于 21 类已经逐类验证准确率**，也不保证辨认所有合奏声部。
+
+安装一次约 1 GB 的模型（CLAP: Apache-2.0；AST: BSD-3-Clause）：
+
+```bash
+python -m pip install -e "./python[instruments]"
+python python/moodio.py instruments setup
+python python/moodio.py instruments status
+```
+
+模型下载固定版本并核对 SHA-256；可显式传 `--endpoint https://hf-mirror.com` 使用镜像。
+默认缓存位于 `~/.cache/moodio/clap-htsat-unfused`，可用 `MOODIO_INSTRUMENT_MODEL_DIR`
+或 `--instrument-model-dir` 指向已有模型。正式分析只读本地权重，不自动下载。
+缺模型时返回 `instruments.status: unavailable`，其余分析继续。需要跳过时使用
+`--no-instruments` 或 `include_instruments: false`。
 
 | 轴 | 范围 | 主要由什么驱动 |
 |---|---|---|
@@ -37,6 +64,28 @@ texture 几乎为零，如果只量攻击性，它会被读成「安静」。
 节奏规整、打击感、音符密度、规模、起伏、和声复杂度，**分析整段音频**。它们是独立
 归一化的 0..1 声学量，和四轴数值不可互换；速度、密度、刺耳仍保留原始单位。
 
+**十八轴诊断**（默认开启；`--no-axes-v3` 可跳过）保留上述十二轴，增加低频存在、噪声感、瞬态锐度、
+速度稳定、调性稳定和铺陈方向。每轴附带 `status`；证据不足时 `value: null`，而不是
+虚构一个低分。铺陈方向中 0 为减弱、0.5 为大体持平、1 为增强。原有 `HarmonicComplexity`
+实际计算的是**音级分布熵**，并不等于和弦复杂度；十八轴输出会显式标记其 `measure`。
+这些扩展数值仍是规则先验，未经过人工标注曲库的准确率验证，不参与四轴情绪判定。
+
+明亮度的两个分量使用连续映射，低于经验参考下限时不再直接截成零。
+`Brightness.evidence` 返回谱质心、3 kHz 以上能量占比及各分量；`normalization`
+标记算法。整曲和分段亮度一致使用该映射，历史亮度及相关起伏分数需重新计算后比较。
+这里度量的是声学频谱亮度，不等同于旋律或情绪上的“明亮”。
+
+**旋律候选**（CLI 和插件默认开启，默认分析整首）使用单声部 `pYIN` 从已分析的波形估计
+`melody.notes`（音高 MIDI、起止秒数、有声概率），再组织 `melody.phrases`（走势）、
+`melody.motifs`（允许整体移调的重复音程序列）和带时间证据的
+`melody.agent_summary`。证据不足时 `status: insufficient_evidence`，不推断乐句。
+命中音高搜索边界的片段会扩大音域复核，剔除不一致读数；`quality.boundary_validation`
+返回复核前后数量。摘要按整首时长报告音符覆盖率及分段证据；重复检测使用跨分句滑窗，
+同时比较音程和相对节奏。`motifs` 为空时由 `motif_search` 解释，不能据此断言原曲没有重复。
+音源未分离：复杂混音的候选音符可能来自伴奏或贝斯，`candidate` **不代表**
+已确认主旋律；重复动机也不等于副歌。需要跳过旋律时传 `--no-melody` 或
+`include_melody: false`。仅在明确需要预览时设置 `max_seconds`；不设置则读取整首。
+
 ## 快速开始
 
 ```bash
@@ -46,12 +95,15 @@ pip install -r python/requirements.txt
 
 python python/moodio.py analyze --path song.mp3 --human
 python python/moodio.py analyze --path song.mp3 --axes-v2 --fields emotion,emotion_4d,axes_v2
-python python/moodio.py batch  --path ./music --axes-v2 --out mood.jsonl --workers 6
+python python/moodio.py analyze --path song.mp3 --axes-v3 --fields emotion,emotion_4d,axes_v3
+python python/moodio.py analyze --path song.mp3 --melody --fields clip,melody,warnings
+python python/moodio.py batch  --path ./music --out mood.jsonl --workers 1
 python python/moodio.py report --path mood.jsonl
 ```
 
 需要 Python 3.9+。`batch` 每首写一行 JSON 并追加，重跑即续跑：完成的跳过，失败的
-重试，stdout 始终可解析。
+重试，stdout 始终可解析。已有十二轴批量结果要补跑十八轴时，请使用**新的** `--out` 路径；
+断点续跑不会修改已完成记录；旧批量结果若需补充乐器、旋律或更新亮度，也请换新的 `--out`。
 
 ## 100 首实测
 
@@ -75,18 +127,30 @@ plugin_manager(action: "install_bundle", target: "<dsh-Moodio 的绝对路径>")
 三个工具：`analyze_music_emotion`、`batch_analyze_music`、`transcribe_music_lyrics`。
 分析器就在包内 `python/`，相对 `index.js` 解析，不需要配置路径。
 
-每次工具调用都会先搜该曲的创作背景和歌词，返回来源链接，排除评论与乐评。只发送
-清理后的文件名，不发送本地目录。**搜索失败时返回 `WEB_RESEARCH_FAILED`，不会瞎猜**；
-独立的 Python CLI 则完全离线。
+插件先完成本地声学分析（或歌词转写），再联网检索创作背景和歌词，返回来源链接，
+排除评论与乐评。只发送清理后的文件名，不发送本地目录。
+
+**检索是硬性环节，不是可选开关。** 没有配置项能关掉它，也没有离线降级：拿不到
+`web.search`，或者查询抛错，整次调用直接返回 `WEB_RESEARCH_FAILED`，不会给出没有来源
+的分析结果。独立的 Python CLI 仍然完全离线。
+
+检索前会先把文件名还原成主标题——`【Animenz】残酷天使的行动纲领 – 新世纪福音战士
+OP1 钢琴版` 变成 `残酷天使的行动纲领`——并按标题覆盖率匹配来源，而不是要求整串包含，
+所以只写着歌名的页面不会被「缺了改编副标题」判掉。每次返回都会带上实际发出的
+`queries`，以及各通道的 `returned` / `rejected`，用来区分「没有任何结果」和「都被过滤了」。
 
 ```
 analyze_music_emotion(path: "/music/track.flac", include_axes_v2: true)
-batch_analyze_music(path: "/music", workers: 6, limit: 50)
+analyze_music_emotion(path: "/music/track.flac", include_axes_v3: true)
+analyze_music_emotion(path: "/music/track.flac", include_melody: true)
+batch_analyze_music(path: "/music", workers: 1, limit: 50)
 transcribe_music_lyrics(path: "/music/track.flac", model_dir: "/models/faster-whisper")
 ```
 
-批量调用会为每首待处理曲目返回 `research_by_track`，单次上限 50 首；更大的集合传
-`limit: 50` 分批续跑。
+批量完成声学分析后会为每首待处理曲目返回 `research_by_track`。单次上限 50 首；更大的
+集合传 `limit: 50` 分批续跑。任何一首检索失败，整批返回 `WEB_RESEARCH_FAILED`，
+已完成的声学结果放在 `value.partial` 里保留。若部分音频本身分析失败，批量结果仍带
+失败数并标为错误。
 
 ## 歌词转写（可选）
 
@@ -113,10 +177,16 @@ python python/moodio.py lyrics --path song.mp3 --model-dir /models/faster-whispe
 `confidence` 是输入质量，不是准确率。短、轻、无调性或非周期性的音频分数低。
 
 速度有八度问题：自相关常在 `t` 与 `2t` 同时出峰，读到 95 BPM 可能其实是 184。速度
-占唤醒 0.30 的权重，错一个八度结果就偏。
+占唤醒 0.30 的权重，错一个八度结果就偏。`TempoStability` 接近 0 就是征兆：估计器正在
+两个八度之间来回跳，这时候速度值本身不该被信。
 
 削波的母带在分析前就已经丢了动态。峰值 `>= 0.995` 会置 `clipping_suspected`，规模这类
 动态指标会一并受害。
+
+视频提取的音轨和分离出来的分轨常常被削掉高频。3 kHz 以上几乎没有能量时，明亮会掉到接近
+0，瞬态锐度也跟着塌——一首钢琴曲可能比管弦乐还「暗」。看
+`axes_v3.axes.Brightness.evidence.high_frequency_energy_share`：真实原声乐器一般在
+1–5%，被低通过的文件只有 0.2% 左右。怀疑编曲之前，先换一版无损源对照。
 
 `--max-seconds` 截断可能删掉一首歌的性格：安静的前奏会藏住 grandeur。管弦乐请分析整首。
 
@@ -136,6 +206,7 @@ python/
     texture.py        织体与规模
     four_axis.py      四轴落到一个情绪词
     axes_v2.py        可选十二轴诊断
+                      十八轴共用特征提取，启用 --axes-v3 后追加六轴
     features.py       librosa 特征，每首只算一次
     pipeline.py       编排
     batch.py          可续跑的目录批处理

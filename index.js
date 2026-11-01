@@ -29,6 +29,7 @@ import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { researchSong } from './research.js'
+import { combineMusicEvidence } from './interpretation.js'
 
 /** Exit codes mirrored from moodio.py; kept in sync deliberately.
  *  10/11 为保留码，当前 moodio 不会发出。 */
@@ -103,10 +104,10 @@ function parseStructuredError(text) {
 
 /**
  * Run the analyzer and normalize the outcome into
- *   { ok: true, data } | { ok: false, code, message, suggestion, exitCode? }
+ *   { ok: true, data, partial? } | { ok: false, code, message, suggestion, exitCode? }
  * Never throws.
  */
-async function runAnalyzer(ctx, cfg, argv, { timeoutMs, signal } = {}) {
+async function runAnalyzer(ctx, cfg, argv, { timeoutMs, signal, allowPartialBatch = false } = {}) {
   const script = path.join(cfg.projectDir, cfg.analyzer)
   if (!existsSync(script)) {
     return {
@@ -197,6 +198,18 @@ async function runAnalyzer(ctx, cfg, argv, { timeoutMs, signal } = {}) {
   }
 
   if (exitCode !== 0) {
+    if (allowPartialBatch && exitCode === 1 && !stdout.lossy) {
+      try {
+        const data = JSON.parse(stdout.text.trim())
+        if (Number.isInteger(data.processed) && Number.isInteger(data.ok) &&
+            Number.isInteger(data.failed) && data.failed > 0 &&
+            data.processed === data.ok + data.failed && typeof data.out === 'string') {
+          return { ok: true, data, partial: true }
+        }
+      } catch {
+        // A non-JSON error is still a normal subprocess failure.
+      }
+    }
     const structured = parseStructuredError(stderr.text)
     return {
       ok: false,
@@ -242,7 +255,7 @@ async function runAnalyzer(ctx, cfg, argv, { timeoutMs, signal } = {}) {
 }
 
 /** Build a compact, decision-ready summary instead of dumping the whole report. */
-function summarizeAnalysis(data, { includeSegments, includeEvidence, includeAxesV2 }) {
+function summarizeAnalysis(data, { includeSegments, includeEvidence, includeAxesV2, includeAxesV3, includeMelody, includeInstruments }) {
   const emo = data.emotion ?? {}
   const four = data.emotion_4d ?? {}
   const quality = data.quality ?? {}
@@ -291,6 +304,9 @@ function summarizeAnalysis(data, { includeSegments, includeEvidence, includeAxes
     out.segments = []
   }
   if (includeAxesV2 && data.axes_v2) out.axes_v2 = data.axes_v2
+  if (includeAxesV3 && data.axes_v3) out.axes_v3 = data.axes_v3
+  if (includeMelody && data.melody) out.melody = data.melody
+  if (includeInstruments && data.instruments) out.instruments = data.instruments
   if (includeEvidence) {
     if (data.deltas) out.deltas = data.deltas
     if (data.features) out.features = data.features
@@ -299,7 +315,22 @@ function summarizeAnalysis(data, { includeSegments, includeEvidence, includeAxes
   return out
 }
 
-async function requireResearch(ctx, audioPath, signal) {
+// Online background + lyric research is part of the contract, not a toggle:
+// every call runs it after the acoustic pass and fails loudly when the provider
+// is missing or the query errors. There is deliberately no config switch, no
+// offline fallback, and no "analysis succeeded without sources" path.
+function researchPreflight(ctx) {
+  if (typeof ctx?.web?.search !== 'function') {
+    return {
+      code: 'WEB_RESEARCH_FAILED',
+      message: 'online background and lyrics lookup is required, but no web search provider is available',
+      suggestion: 'Enable a web search provider; analysis stays blocked because sources are mandatory.',
+    }
+  }
+  return null
+}
+
+async function researchOrFail(ctx, audioPath, signal) {
   try {
     return { ok: true, data: await researchSong(ctx.web, audioPath, signal) }
   } catch (error) {
@@ -307,8 +338,15 @@ async function requireResearch(ctx, audioPath, signal) {
       ok: false,
       code: 'WEB_RESEARCH_FAILED',
       message: `background and lyrics lookup failed: ${error instanceof Error ? error.message : String(error)}`,
-      suggestion: 'Restore the web search service and retry; Moodio does not analyze without both searches.',
+      suggestion: 'Retry once the search provider is reachable; the acoustic pass already completed.',
     }
+  }
+}
+
+function researchResult(lookup) {
+  return lookup.ok ? lookup.data : {
+    status: 'failed',
+    error: { code: lookup.code, message: lookup.message },
   }
 }
 
@@ -342,14 +380,19 @@ export function apply(ctx, config = {}) {
       ctx.tools.register({
         name: 'analyze_music_emotion',
         description:
-          'Analyze one audio file and return its emotion. Reports four axes: valence (negative..positive), ' +
+          'Analyze the whole audio file with 21-target instrument recognition, melody, 18 acoustic axes and sourced context. ' +
+          'Use music_analysis to combine all evidence in the emotion explanation, citing timestamps and source links. ' +
+          'Instrument labels are zero-shot candidates, not guaranteed classifications; similar timbres may be ambiguous. ' +
+          'The acoustic baseline reports valence (negative..positive), ' +
           'arousal (calm..energetic), texture (attack: distortion and percussion, high for rock/electronic), ' +
           'and grandeur (scale: dynamic range plus sustained loudness, high for orchestral/epic). ' +
           'The emotion word derives from all four, which keeps sombre-and-grand (悲壮) distinct from ' +
           'intimate sadness (悲伤), and triumphant (昂扬) distinct from cheerful (欢快). ' +
           'Use this instead of guessing emotion from a title or artist: it reads the actual audio. ' +
-          'Before every analysis, searches online for creation background and lyrics, excluding song reviews/comments. ' +
-          'Search failure stops analysis; online text is for interpretation only, not the acoustic score. ' +
+          'After acoustic analysis, searches online for creation background and lyrics, excluding song reviews/comments. ' +
+          'Search failure is reported without discarding acoustic results; online text does not change the score. ' +
+          'By default, analyzes the whole song including time-stamped candidate notes, phrase contours and repeated motifs; ' +
+          'the analyzer cannot guarantee the predominant melody in a dense mix. ' +
           'Values are relative coordinates from an acoustic prior, not human rating averages, so compare tracks ' +
           'within one run rather than ' +
           'quoting absolute numbers. When analysing epic or orchestral tracks, do not truncate with ' +
@@ -387,6 +430,26 @@ export function apply(ctx, config = {}) {
               type: 'boolean',
               description: 'Also compute 12 independent acoustic axes over the full analyzed audio (default false). These 0..1 diagnostics do not replace the original four-axis score.',
             },
+            include_axes_v3: {
+              type: 'boolean',
+              default: true,
+              description: 'Compute 18 acoustic diagnostics by default; set false to skip. Null means insufficient evidence, not a low score.',
+            },
+            include_instruments: {
+              type: 'boolean', default: true,
+              description: 'Identify candidates among 21 Chinese and Western instruments with a local model, including time evidence and ambiguity. Set false to skip.',
+            },
+            instrument_model_dir: {
+              type: 'string', description: 'Optional local CLAP model directory; otherwise uses the environment or user cache.',
+            },
+            instrument_device: {
+              type: 'string', enum: ['auto', 'cpu', 'cuda'], description: 'Instrument inference device (default auto).',
+            },
+            include_melody: {
+              type: 'boolean',
+              default: true,
+              description: 'Analyze melody across the whole song by default: candidate notes, phrase contours and repeated motifs. Set false to skip melody. No source separation: dense mixes may follow accompaniment instead.',
+            },
           },
           required: ['path'],
           additionalProperties: false,
@@ -415,14 +478,16 @@ export function apply(ctx, config = {}) {
             })
           }
 
-          const lookup = await requireResearch(ctx, input.path, exec?.signal)
-          if (!lookup.ok) return fail(lookup)
-
           const argv = ['analyze', '--path', input.path]
           if (Number.isFinite(input.segment_sec)) argv.push('--segment-sec', String(input.segment_sec))
           if (Number.isFinite(input.hop_sec)) argv.push('--hop-sec', String(input.hop_sec))
-          if (Number.isFinite(input.max_seconds)) argv.push('--max-seconds', String(input.max_seconds))
+          argv.push('--max-seconds', String(Number.isFinite(input.max_seconds) ? input.max_seconds : 0))
           if (input.include_axes_v2 === true) argv.push('--axes-v2')
+          argv.push(input.include_axes_v3 === false ? '--no-axes-v3' : '--axes-v3')
+          argv.push(input.include_melody === false ? '--no-melody' : '--melody')
+          argv.push(input.include_instruments === false ? '--no-instruments' : '--instruments')
+          if (typeof input.instrument_model_dir === 'string' && input.instrument_model_dir.trim()) argv.push('--instrument-model-dir', input.instrument_model_dir)
+          if (['auto', 'cpu', 'cuda'].includes(input.instrument_device)) argv.push('--instrument-device', input.instrument_device)
 
           const fields = input.include_evidence
             ? [...RESULT_FIELDS]
@@ -432,19 +497,37 @@ export function apply(ctx, config = {}) {
           // an empty array that looks like "no timeline".
           if (input.include_segments && !fields.includes('segments')) fields.push('segments')
           if (input.include_axes_v2 === true) fields.push('axes_v2')
+          if (input.include_axes_v3 !== false) fields.push('axes_v3')
+          if (input.include_melody !== false) fields.push('melody')
+          if (input.include_instruments !== false) fields.push('instruments')
+          fields.push('music_analysis')
           argv.push('--fields', fields.join(','))
           if (!input.include_segments) argv.push('--no-segments')
 
+          const blocked = researchPreflight(ctx)
+          if (blocked) return fail(blocked)
+
           const result = await runAnalyzer(ctx, cfg, argv, { signal: exec?.signal })
           if (!result.ok) return fail(result)
+
+          const lookup = await researchOrFail(ctx, input.path, exec?.signal)
+          if (!lookup.ok) return fail(lookup)
 
           const value = {
             ...summarizeAnalysis(result.data, {
               includeSegments: Boolean(input.include_segments),
               includeEvidence: Boolean(input.include_evidence),
               includeAxesV2: input.include_axes_v2 === true,
+              includeAxesV3: input.include_axes_v3 !== false,
+              includeMelody: input.include_melody !== false,
+              includeInstruments: input.include_instruments !== false,
             }),
-            research: lookup.data,
+            research: researchResult(lookup),
+            music_analysis: combineMusicEvidence(result.data, researchResult(lookup)),
+          }
+          if (!lookup.data.background.found && !lookup.data.lyrics.found) {
+            value.warnings = [...(value.warnings ?? []),
+              'Searches ran but no usable background or lyric source matched the title; sources are not optional, the queries are recorded in research.queries.']
           }
           return {
             isError: false,
@@ -462,9 +545,9 @@ export function apply(ctx, config = {}) {
           'Analyze every audio file under a directory, appending one JSON record per track to a JSONL file. ' +
           'Resumable: re-running skips tracks that already succeeded and retries the failed ones, so a long ' +
           'run survives interruption. Progress is not returned; the returned value is the final summary. ' +
-          'Use this instead of calling analyze_music_emotion in a loop. Before processing, ' +
+          'Use this instead of calling analyze_music_emotion in a loop. After processing, ' +
           'searches creation background and lyrics online for every pending track; never searches song reviews/comments. ' +
-          'At most 50 tracks per invocation; web failure stops the batch before analysis.',
+          'At most 50 tracks per invocation; web failure is reported without discarding the acoustic batch.',
         parameters: {
           type: 'object',
           properties: {
@@ -478,7 +561,7 @@ export function apply(ctx, config = {}) {
             },
             workers: {
               type: 'integer',
-              description: 'Parallel worker processes (default 4). Raise only with spare cores.',
+              description: 'Parallel worker processes (default 1); each loads its own instrument model. Raise only with spare memory and cores.',
             },
             limit: {
               type: 'integer',
@@ -497,6 +580,26 @@ export function apply(ctx, config = {}) {
             include_axes_v2: {
               type: 'boolean',
               description: 'Add independent 12-axis diagnostics over the full analyzed audio to each record (default false).',
+            },
+            include_axes_v3: {
+              type: 'boolean',
+              default: true,
+              description: 'Add 18-axis full-audio diagnostics by default; set false to skip.',
+            },
+            include_instruments: {
+              type: 'boolean', default: true,
+              description: 'Add local 21-target instrument candidates and timing evidence by default; set false to skip.',
+            },
+            instrument_model_dir: {
+              type: 'string', description: 'Optional local CLAP model directory.',
+            },
+            instrument_device: {
+              type: 'string', enum: ['auto', 'cpu', 'cuda'], description: 'Instrument inference device (default auto).',
+            },
+            include_melody: {
+              type: 'boolean',
+              default: true,
+              description: 'Analyze the whole song melody for each record by default, including candidate notes, phrases and repeated motifs. Set false to skip melody.',
             },
             no_resume: {
               type: 'boolean',
@@ -535,9 +638,17 @@ export function apply(ctx, config = {}) {
           if (Number.isFinite(input.limit)) argv.push('--limit', String(input.limit))
           if (Number.isFinite(input.segment_sec)) argv.push('--segment-sec', String(input.segment_sec))
           if (Number.isFinite(input.hop_sec)) argv.push('--hop-sec', String(input.hop_sec))
-          if (Number.isFinite(input.max_seconds)) argv.push('--max-seconds', String(input.max_seconds))
+          argv.push('--max-seconds', String(Number.isFinite(input.max_seconds) ? input.max_seconds : 0))
           if (input.no_resume === true) argv.push('--no-resume')
           if (input.include_axes_v2 === true) argv.push('--axes-v2')
+          argv.push(input.include_axes_v3 === false ? '--no-axes-v3' : '--axes-v3')
+          argv.push(input.include_melody === false ? '--no-melody' : '--melody')
+          argv.push(input.include_instruments === false ? '--no-instruments' : '--instruments')
+          if (typeof input.instrument_model_dir === 'string' && input.instrument_model_dir.trim()) argv.push('--instrument-model-dir', input.instrument_model_dir)
+          if (['auto', 'cpu', 'cuda'].includes(input.instrument_device)) argv.push('--instrument-device', input.instrument_device)
+
+          const blocked = researchPreflight(ctx)
+          if (blocked) return fail(blocked)
 
           const listing = await runAnalyzer(ctx, cfg, [...argv, '--list-only'], { signal: exec?.signal })
           if (!listing.ok) return fail(listing)
@@ -546,7 +657,7 @@ export function apply(ctx, config = {}) {
             return fail({ code: 'BATCH_PREFLIGHT_FAILED', message: 'analyzer returned an invalid pending-song list' })
           }
           if (pending.length === 0) {
-            return fail({ code: 'NO_PENDING_AUDIO', message: 'no pending audio tracks to research and analyze' })
+            return fail({ code: 'NO_PENDING_AUDIO', message: 'no pending audio tracks to analyze' })
           }
           if (pending.length > 50) {
             return fail({
@@ -555,27 +666,43 @@ export function apply(ctx, config = {}) {
               suggestion: 'Pass limit: 50 and resume until the directory is complete.',
             })
           }
-          const researchByTrack = []
-          for (const rel of pending) {
-            const lookup = await requireResearch(ctx, path.join(input.path, ...rel.split('/')), exec?.signal)
-            if (!lookup.ok) return fail({ ...lookup, message: `${rel}: ${lookup.message}` })
-            researchByTrack.push({ path: rel, ...lookup.data })
-          }
           argv.push('--preflight-files', JSON.stringify(pending))
 
           const result = await runAnalyzer(ctx, cfg, argv, {
             timeoutMs: Number.isFinite(input.timeout_ms) ? input.timeout_ms : cfg.defaultTimeoutMs,
             signal: exec?.signal,
+            allowPartialBatch: true,
           })
           if (!result.ok) return fail(result)
 
+          const researchByTrack = []
+          for (const rel of pending) {
+            const lookup = await researchOrFail(ctx, path.join(input.path, ...rel.split('/')), exec?.signal)
+            researchByTrack.push({ path: rel, ...researchResult(lookup) })
+          }
+
           // Drop the CLI's agent-context tail; it is noise inside a tool result.
           const value = { ...result.data, research_by_track: researchByTrack }
+          const researchMap = new Map(researchByTrack.map((item) => [item.path, item]))
+          value.analyses = (result.data.analyses ?? []).map((item) => ({
+            path: item.path,
+            music_analysis: combineMusicEvidence(item, researchMap.get(item.path)),
+          }))
+          value.research_failed = researchByTrack.filter((track) => track.status === 'failed').length
           delete value.skills
           delete value.issue
 
+          if (value.research_failed > 0) {
+            return fail({
+              code: 'WEB_RESEARCH_FAILED',
+              message: `${value.research_failed} of ${researchByTrack.length} tracks could not be researched online`,
+              suggestion: 'Re-run once the search provider is reachable; the acoustic results already produced are in partial.',
+              partial: value,
+            })
+          }
+
           return {
-            isError: false,
+            isError: Boolean(result.partial),
             value,
             content: [{ type: 'text', text: JSON.stringify(value, null, 2) }],
           }
@@ -588,7 +715,7 @@ export function apply(ctx, config = {}) {
         name: 'transcribe_music_lyrics',
         description:
           'Transcribe sung words from a local audio file with an optional faster-whisper model. ' +
-          'The ASR model must be local and is never downloaded; every call first searches online for ' +
+          'The ASR model must be local and is never downloaded; after transcription each call searches online for ' +
           'creation background and lyrics, excluding song reviews/comments. ' +
           'This is an ASR guess from the mixed recording, not verified lyrics; vocals buried in music ' +
           'may be missed or hallucinated. Lyrics do not change the acoustic emotion score.',
@@ -628,8 +755,6 @@ export function apply(ctx, config = {}) {
               suggestion: 'Pass an absolute path to an audio file.',
             })
           }
-          const lookup = await requireResearch(ctx, input.path, exec?.signal)
-          if (!lookup.ok) return fail(lookup)
           const argv = ['lyrics', '--path', input.path]
           if (typeof input.model_dir === 'string' && input.model_dir.trim()) {
             argv.push('--model-dir', input.model_dir)
@@ -638,12 +763,18 @@ export function apply(ctx, config = {}) {
             argv.push('--language', input.language)
           }
           if (input.device === 'cpu' || input.device === 'cuda') argv.push('--device', input.device)
+
+          const blocked = researchPreflight(ctx)
+          if (blocked) return fail(blocked)
+
           const result = await runAnalyzer(ctx, cfg, argv, {
             timeoutMs: Number.isFinite(input.timeout_ms) ? input.timeout_ms : cfg.defaultTimeoutMs,
             signal: exec?.signal,
           })
           if (!result.ok) return fail(result)
-          const value = { ...result.data, research: lookup.data }
+          const lookup = await researchOrFail(ctx, input.path, exec?.signal)
+          if (!lookup.ok) return fail(lookup)
+          const value = { ...result.data, research: researchResult(lookup) }
           return { isError: false, value, content: [{ type: 'text', text: JSON.stringify(value, null, 2) }] }
         },
       }),

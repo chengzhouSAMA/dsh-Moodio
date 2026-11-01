@@ -1,12 +1,12 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "moodio"
 version = "2.2.1"
-description = "Music emotion with optional 12-axis diagnostics, local lyrics ASR, and online source research in the Host plugin."
-readme = "../README.md"
+description = "Music understanding with 21-target instrument recognition, melody, 18 acoustic axes, and sourced context."
+readme = { text = "Local music analysis for agents: instrument candidates, melody evidence, eighteen acoustic axes, and sourced context through the Host plugin. See the repository README for model setup and limitations.", content-type = "text/plain" }
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "moodio contributors" }]
@@ -21,6 +21,7 @@ dependencies = [
 [project.optional-dependencies]
 neural = ["torch>=2.0", "transformers>=4.30"]
 lyrics = ["faster-whisper>=1.0"]
+instruments = ["torch>=2.6", "transformers>=4.57,<5", "huggingface-hub>=0.26", "safetensors>=0.4"]
 
 [project.scripts]
 moodio = "moodio:main"

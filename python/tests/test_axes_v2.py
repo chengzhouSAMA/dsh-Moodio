@@ -32,6 +32,76 @@ class TwelveAxesTests(unittest.TestCase):
         self.assertEqual(axes["Tempo"]["unit"], "BPM")
         self.assertEqual(axes["Density"]["unit"], "onsets/s")
 
+    def test_brightness_below_old_floor_is_not_clipped_to_zero(self) -> None:
+        from music_emotion.axes_v2 import DEFAULT_RANGES, _brightness, norm
+
+        # 用户提供的《鸟之诗》整首原始读数：两项略低于旧参考下界。
+        centroid, high_frequency = 2.9442043740165453, -2.663729190826416
+        legacy = (0.6 * norm(centroid, DEFAULT_RANGES["log_centroid"]) +
+                  0.4 * norm(high_frequency, DEFAULT_RANGES["log_hf"]))
+        self.assertEqual(float(legacy), 0.0)
+        value = float(_brightness(centroid, high_frequency, DEFAULT_RANGES))
+        self.assertGreater(value, 0.0)
+        self.assertLess(value, 0.05)
+
+    def test_brightness_reference_anchors_are_smooth_and_monotonic(self) -> None:
+        from music_emotion.axes_v2 import DEFAULT_RANGES, _brightness_norm
+
+        for key in ("log_centroid", "log_hf"):
+            lo, hi = DEFAULT_RANGES[key]
+            anchors = _brightness_norm(np.array([lo, (lo + hi) / 2, hi]), (lo, hi))
+            np.testing.assert_allclose(anchors, [0.05, 0.5, 0.95], atol=1e-12)
+            values = _brightness_norm(np.linspace(lo - 0.3, hi + 0.3, 100), (lo, hi))
+            self.assertTrue(np.all(np.diff(values) > 0))
+            self.assertTrue(np.all((values > 0) & (values < 1)))
+        with self.assertRaises(ValueError):
+            _brightness_norm(1.0, (1.0, 1.0))
+
+    def test_dim_tones_remain_distinguishable_and_gain_invariant(self) -> None:
+        from music_emotion.axes_v2 import DEFAULT_RANGES, N_FFT, extract, score
+
+        t = np.arange(self.sr * 3, dtype=np.float64) / self.sr
+        values = []
+        for frequency, gain in ((440, 0.1), (880, 0.1), (880, 0.02)):
+            audio = (gain * np.sin(2 * np.pi * frequency * t)).astype(np.float32)
+            features, segments = extract(audio)
+            brightness = score(features, segments, DEFAULT_RANGES)["Brightness"]
+            self.assertEqual(brightness["normalization"]["method"], "logistic_p05_p95")
+            self.assertAlmostEqual(brightness["evidence"]["spectral_centroid_hz"], frequency, delta=self.sr / N_FFT)
+            values.append(brightness["value"])
+        self.assertGreater(values[1], values[0])
+        self.assertGreater(values[0], 0.0)
+        self.assertAlmostEqual(values[1], values[2], delta=0.001)
+
+    def test_global_and_segment_brightness_use_the_same_mapping(self) -> None:
+        from music_emotion.axes_v2 import DEFAULT_RANGES, _brightness, extract, score
+
+        features, segments = extract(self.audio)
+        result = score(features, segments, DEFAULT_RANGES, with_segments=True)
+        expected = [round(float(_brightness(c, h, DEFAULT_RANGES)), 3)
+                    for c, h in zip(segments["log_centroid"], segments["log_hf"])]
+        self.assertEqual(result["BuildContrast"]["segments"]["brightness"], expected)
+        evidence = result["Brightness"]["evidence"]
+        self.assertAlmostEqual(evidence["score_unrounded"],
+                               0.6 * evidence["centroid_component"] + 0.4 * evidence["high_frequency_component"],
+                               places=6)
+
+    def test_brightness_fix_leaves_unrelated_axes_unchanged(self) -> None:
+        from unittest.mock import patch
+        from music_emotion.axes_v2 import DEFAULT_RANGES, extract, norm, score
+
+        features, segments = extract(self.audio, extended=True)
+        current = score(dict(features), segments, DEFAULT_RANGES, extended=True)
+
+        def legacy(centroid, high_frequency, ranges):
+            return 0.6 * norm(centroid, ranges["log_centroid"]) + 0.4 * norm(high_frequency, ranges["log_hf"])
+
+        with patch("music_emotion.axes_v2._brightness", side_effect=legacy):
+            previous = score(dict(features), segments, DEFAULT_RANGES, extended=True)
+        for axis in current:
+            if axis not in ("Brightness", "BuildContrast", "BuildDirection"):
+                self.assertEqual(current[axis], previous[axis], axis)
+
     def test_opt_in_does_not_change_existing_four_axis_result(self) -> None:
         from music_emotion.pipeline import analyze_waveform
         from music_emotion.types import ClipInfo

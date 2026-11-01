@@ -163,6 +163,11 @@ def cmd_analyze(args: argparse.Namespace) -> int:
             with_neural=bool(args.neural) and not args.no_neural,
             neural_model_dir=args.neural_model_dir,
             with_axes_v2=bool(args.axes_v2),
+            with_axes_v3=bool(args.axes_v3),
+            with_melody=bool(args.melody),
+            with_instruments=bool(args.instruments),
+            instrument_model_dir=args.instrument_model_dir,
+            instrument_device=args.instrument_device,
         )
     except MusicEmotionError as exc:
         raise CliError(exc.code, exc.message, exc.suggestion) from exc
@@ -250,16 +255,39 @@ def cmd_batch(args: argparse.Namespace) -> int:
             log=_log,
             preflight_files=preflight_files,
             with_axes_v2=bool(args.axes_v2),
+            with_axes_v3=bool(args.axes_v3),
+            with_melody=bool(args.melody),
+            with_instruments=bool(args.instruments),
+            instrument_model_dir=args.instrument_model_dir,
+            instrument_device=args.instrument_device,
         )
     except FileNotFoundError as exc:
         raise CliError("DIR_NOT_FOUND", str(exc), "check --path", EXIT_NOT_FOUND) from exc
     except ValueError as exc:
-        raise CliError("BATCH_PREFLIGHT_CHANGED", str(exc), "retry the lookup before batch analysis", EXIT_CONFLICT) from exc
+        raise CliError("BATCH_PREFLIGHT_CHANGED", str(exc), "retry batch preflight", EXIT_CONFLICT) from exc
 
     summary.update(_agent_context())
     _print_json(summary)
     # 有失败项时不要假装全成功：非零退出码 + 失败明细已在 JSON 里
     return EXIT_OK if summary.get("failed", 0) == 0 else EXIT_GENERAL
+
+
+def cmd_instruments(args: argparse.Namespace) -> int:
+    from music_emotion.instruments import model_status, setup_model
+
+    if args.action == "setup":
+        try:
+            result = setup_model(args.model_dir, args.endpoint)
+        except ImportError as exc:
+            raise CliError("DEPENDENCY_MISSING", "instrument model dependencies are missing",
+                           "python -m pip install -e 'python[instruments]'") from exc
+        except Exception as exc:
+            raise CliError("MODEL_SETUP_FAILED", f"instrument model setup failed ({type(exc).__name__})",
+                           "check network access, model directory and optional --endpoint") from exc
+    else:
+        result = model_status(args.model_dir)
+    _print_json(result)
+    return EXIT_OK
 
 
 # ---------------------------------------------------------------- lyrics
@@ -342,8 +370,8 @@ def cmd_report(args: argparse.Namespace) -> int:
 #: 合法顶层字段，用于参数预校验。
 _TOP_FIELDS = (
     "arc", "clip", "deltas", "emotion", "emotion_4d", "texture", "grandeur",
-    "features", "modes", "neural", "quality", "schema_version", "axes_v2",
-    "segments", "warnings",
+    "features", "modes", "neural", "quality", "schema_version", "axes_v2", "axes_v3",
+    "segments", "warnings", "melody", "instruments", "music_analysis",
 )
 
 
@@ -387,6 +415,11 @@ def _print_human(payload: Dict[str, Any]) -> None:
         if e4.get("desc"):
             print(f"    {e4['desc']}")
     print(f"  arc={payload.get('arc')}  confidence={q.get('confidence')}")
+    analysis = payload.get("music_analysis") or {}
+    if analysis.get("summary"):
+        print(f"  综合证据：{analysis['summary']}")
+        for constraint in analysis.get("constraints", []):
+            print(f"    {constraint}")
     segs = payload.get("segments")
     if isinstance(segs, list) and segs:
         print("  timeline:")
@@ -419,7 +452,7 @@ def cmd_help(args: argparse.Namespace) -> int:
         "help": {
             "name": "moodio",
             "version": VERSION,
-            "summary": "Music emotion (valence/arousal) analysis for agents.",
+            "summary": "Whole-song instruments, melody, eighteen acoustic axes and combined music-emotion evidence for agents.",
             "usage": ("moodio analyze --path <audio> [options] | "
                       "moodio lyrics --path <audio> --model-dir <local-model> [options] | "
                       "moodio batch --path <dir> [options]"),
@@ -459,6 +492,20 @@ def _command_specs() -> List[Dict[str, Any]]:
                  "default": 0, "description": "analyze only the first N seconds (0 = all)"},
                 {"name": "axes_v2", "flag": "--axes-v2", "type": "boolean", "required": False,
                  "description": "add independent 12-axis diagnostics over the full analyzed audio"},
+                {"name": "axes_v3", "flag": "--axes-v3", "type": "boolean", "required": False,
+                 "default": True, "description": "18-axis diagnostics over the full analyzed audio are enabled by default"},
+                {"name": "no_axes_v3", "flag": "--no-axes-v3", "type": "boolean", "required": False,
+                 "description": "skip 18-axis diagnostics"},
+                {"name": "no_instruments", "flag": "--no-instruments", "type": "boolean", "required": False,
+                 "description": "skip the default 21-target local instrument recognition"},
+                {"name": "instrument_model_dir", "flag": "--instrument-model-dir", "type": "string", "required": False,
+                 "description": "local CLAP model directory; defaults to MOODIO_INSTRUMENT_MODEL_DIR or the user cache"},
+                {"name": "instrument_device", "flag": "--instrument-device", "type": "string", "required": False,
+                 "enum": ["auto", "cpu", "cuda"], "default": "auto"},
+                {"name": "melody", "flag": "--melody", "type": "boolean", "required": False,
+                 "default": True, "description": "whole-song candidate melody, phrases and repetitions are enabled by default"},
+                {"name": "no_melody", "flag": "--no-melody", "type": "boolean", "required": False,
+                 "description": "skip melody analysis"},
                 {"name": "no_neural", "flag": "--no-neural", "type": "boolean", "required": False,
                  "description": "skip the wav2small neural sidecar"},
                 {"name": "no_segments", "flag": "--no-segments", "type": "boolean", "required": False,
@@ -481,17 +528,42 @@ def _command_specs() -> List[Dict[str, Any]]:
                  "default": "./moodio_batch.jsonl",
                  "description": "JSONL output path (appended, never rewritten)"},
                 {"name": "workers", "flag": "--workers", "type": "integer", "required": False,
-                 "default": 4, "description": "parallel worker processes"},
+                 "default": 1, "description": "parallel worker processes; each loads its own instrument model"},
                 {"name": "limit", "flag": "--limit", "type": "integer", "required": False,
                  "default": 0, "description": "only process the first N pending tracks"},
                 {"name": "max_seconds", "flag": "--max-seconds", "type": "number", "required": False,
                  "default": 0, "description": "analyze only the first N seconds per track"},
                 {"name": "axes_v2", "flag": "--axes-v2", "type": "boolean", "required": False,
                  "description": "add independent 12-axis diagnostics to each record"},
+                {"name": "axes_v3", "flag": "--axes-v3", "type": "boolean", "required": False,
+                 "default": True, "description": "18-axis diagnostics are enabled for each record by default"},
+                {"name": "no_axes_v3", "flag": "--no-axes-v3", "type": "boolean", "required": False,
+                 "description": "skip 18-axis diagnostics"},
+                {"name": "no_instruments", "flag": "--no-instruments", "type": "boolean", "required": False,
+                 "description": "skip the default local instrument recognition"},
+                {"name": "instrument_model_dir", "flag": "--instrument-model-dir", "type": "string", "required": False,
+                 "description": "local instrument model directory"},
+                {"name": "instrument_device", "flag": "--instrument-device", "type": "string", "required": False,
+                 "enum": ["auto", "cpu", "cuda"], "default": "auto"},
+                {"name": "melody", "flag": "--melody", "type": "boolean", "required": False,
+                 "default": True, "description": "whole-song candidate melody is enabled for each record by default"},
+                {"name": "no_melody", "flag": "--no-melody", "type": "boolean", "required": False,
+                 "description": "skip melody analysis"},
                 {"name": "no_resume", "flag": "--no-resume", "type": "boolean", "required": False,
                  "description": "discard previous results and start from scratch"},
                 {"name": "quiet", "flag": "--quiet", "type": "boolean", "required": False,
                  "description": "suppress progress output on stderr"},
+            ],
+        },
+        {
+            "name": "instruments",
+            "description": "Inspect the 21-instrument catalog and local model, or explicitly download verified model weights.",
+            "parameters": [
+                {"name": "action", "flag": "positional", "type": "string", "required": False,
+                 "enum": ["status", "catalog", "setup"], "default": "status"},
+                {"name": "model_dir", "flag": "--model-dir", "type": "string", "required": False},
+                {"name": "endpoint", "flag": "--endpoint", "type": "string", "required": False,
+                 "description": "optional Hugging Face mirror for setup only; weights must match the pinned checksum"},
             ],
         },
         {
@@ -667,6 +739,14 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("--hop-sec", type=float, default=10.0)
     a.add_argument("--max-seconds", type=float, default=0.0)
     a.add_argument("--axes-v2", action="store_true", help="append optional 12-axis full-audio diagnostics")
+    a.add_argument("--axes-v3", action="store_true", default=True, help="18-axis diagnostics are enabled by default")
+    a.add_argument("--no-axes-v3", dest="axes_v3", action="store_false")
+    a.add_argument("--instruments", action="store_true", default=True)
+    a.add_argument("--no-instruments", dest="instruments", action="store_false")
+    a.add_argument("--instrument-model-dir", default=None)
+    a.add_argument("--instrument-device", choices=["auto", "cpu", "cuda"], default="auto")
+    a.add_argument("--melody", action="store_true", default=True, help="whole-song melody is enabled by default")
+    a.add_argument("--no-melody", dest="melody", action="store_false", help="skip melody analysis")
     a.add_argument("--no-neural", action="store_true", help="kept for compatibility; neural is off by default")
     a.add_argument("--neural", action="store_true", help="also run the wav2small sidecar")
     a.add_argument("--no-segments", action="store_true")
@@ -680,6 +760,11 @@ def build_parser() -> argparse.ArgumentParser:
     ly.add_argument("--model-dir", default=None)
     ly.add_argument("--language", default=None)
     ly.add_argument("--device", choices=["cpu", "cuda"], default="cpu")
+
+    ins = sub.add_parser("instruments", add_help=False)
+    ins.add_argument("action", nargs="?", choices=["status", "catalog", "setup"], default="status")
+    ins.add_argument("--model-dir", default=None)
+    ins.add_argument("--endpoint", default=None)
 
     s = sub.add_parser("skills", add_help=False)
     s.add_argument("name", nargs="?", default="")
@@ -697,13 +782,21 @@ def build_parser() -> argparse.ArgumentParser:
     bt = sub.add_parser("batch", add_help=False)
     bt.add_argument("--path", required=True)
     bt.add_argument("--out", default="")
-    bt.add_argument("--workers", type=int, default=4)
+    bt.add_argument("--workers", type=int, default=1)
     # limit 必须显式校验：todo[:limit] 对负数会静默丢尾部曲目。
     bt.add_argument("--limit", type=int, default=0)
     bt.add_argument("--segment-sec", type=float, default=10.0)
     bt.add_argument("--hop-sec", type=float, default=10.0)
     bt.add_argument("--max-seconds", type=float, default=0.0)
     bt.add_argument("--axes-v2", action="store_true")
+    bt.add_argument("--axes-v3", action="store_true", default=True)
+    bt.add_argument("--no-axes-v3", dest="axes_v3", action="store_false")
+    bt.add_argument("--instruments", action="store_true", default=True)
+    bt.add_argument("--no-instruments", dest="instruments", action="store_false")
+    bt.add_argument("--instrument-model-dir", default=None)
+    bt.add_argument("--instrument-device", choices=["auto", "cpu", "cuda"], default="auto")
+    bt.add_argument("--melody", action="store_true", default=True)
+    bt.add_argument("--no-melody", dest="melody", action="store_false")
     bt.add_argument("--no-neural", action="store_true",
                     help="kept for compatibility; neural is off by default")
     bt.add_argument("--neural", action="store_true", help="also run the wav2small sidecar")
@@ -751,6 +844,8 @@ def main(argv: List[str] | None = None) -> int:
             return cmd_batch(args)
         if command == "lyrics":
             return cmd_lyrics(args)
+        if command == "instruments":
+            return cmd_instruments(args)
         if command == "report":
             return cmd_report(args)
         if command == "skills":

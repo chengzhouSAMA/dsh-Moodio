@@ -27,7 +27,7 @@ jobs:
         run: node test/offline.test.mjs
 
       - name: Research contract tests
-        run: node --test test/research.test.mjs
+        run: node --test test/research.test.mjs test/interpretation.test.mjs
 
       - name: Validate manifest and locale JSON
         run: |
@@ -75,6 +75,9 @@ jobs:
           python tests/test_four_axis.py
           python tests/test_batch.py
           python tests/test_axes_v2.py
+          python tests/test_axes_v3.py
+          python tests/test_melody.py
+          python tests/test_instruments.py
           python tests/test_lyrics.py
 
       - name: Directionality (synthesised stimuli, slower)
@@ -93,4 +96,6 @@ jobs:
           sf.write("smoke.wav", y.astype("float32"), sr)
           PY
           python moodio.py analyze --path smoke.wav --no-segments --fields emotion,emotion_4d
+          python moodio.py analyze --path smoke.wav --axes-v3 --no-segments --fields emotion,axes_v3
+          python moodio.py analyze --path smoke.wav --melody --no-segments --fields melody
           python moodio.py --version

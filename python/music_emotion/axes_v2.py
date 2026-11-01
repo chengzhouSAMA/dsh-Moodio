@@ -46,16 +46,21 @@ import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 from scipy import signal
 from scipy.ndimage import gaussian_filter1d, median_filter, uniform_filter1d
+from scipy.special import expit
 
 SR = 22050
 N_FFT, HOP = 2048, 512            # short window: loudness, timbre, rhythm
 N_LONG, HOP_LONG = 8192, SR // 2  # long window (fine pitch resolution): roughness, key; one block / 0.5 s
 SEG_SECONDS = 3.0                 # segment length for BuildContrast
 EPS = 1e-9
+MIN_TONAL_CLARITY = 0.45
+MIN_TONAL_HARMONICITY = 0.35
 
 AXES = ["Valence", "Energy", "Brightness", "Warmth", "Dissonance", "Tempo",
         "RhythmicRegularity", "Percussiveness", "Density", "Grandeur", "BuildContrast",
         "HarmonicComplexity"]
+AXES_V3 = AXES + ["BassPresence", "Noisiness", "TransientSharpness",
+                  "TempoStability", "TonalStability", "BuildDirection"]
 ZH = {"Valence": "效价", "Energy": "能量", "Brightness": "明亮", "Warmth": "温润",
       "Dissonance": "刺耳", "Tempo": "速度", "RhythmicRegularity": "节奏规整",
       "Percussiveness": "打击感", "Density": "音符密度", "Grandeur": "规模",
@@ -64,9 +69,14 @@ SHORT = {"Valence": "Val", "Energy": "Ene", "Brightness": "Bri", "Warmth": "War"
          "Dissonance": "Dis", "Tempo": "Tem", "RhythmicRegularity": "Reg",
          "Percussiveness": "Per", "Density": "Den", "Grandeur": "Gra", "BuildContrast": "Bui",
          "HarmonicComplexity": "Har"}
+ZH.update({"BassPresence": "低频存在", "Noisiness": "噪声感", "TransientSharpness": "瞬态锐度",
+           "TempoStability": "速度稳定", "TonalStability": "调性稳定", "BuildDirection": "铺陈方向"})
+SHORT.update({"BassPresence": "Bas", "Noisiness": "Noi", "TransientSharpness": "Att",
+              "TempoStability": "Stb", "TonalStability": "Ton", "BuildDirection": "Dir"})
 
 # (lo, hi) used to scale each raw feature to [0, 1].  Rough guesses for typical music;
 # --calibrate replaces them with the 5th / 95th percentile of YOUR own library.
+# Brightness alone uses these bounds as smooth 0.05/0.95 score anchors, not hard clipping limits.
 DEFAULT_RANGES = {
     "loudness_db": (-32.0, -8.0),       # mean frame RMS, dBFS
     "flux": (0.5, 4.0),                 # mean positive change of band energy per frame, dB
@@ -84,6 +94,7 @@ DEFAULT_RANGES = {
     "bass_share": (0.10, 0.70),         # energy 40-200 Hz / 40-8000 Hz
     "seg_loud_std": (0.5, 6.0),         # std of segment loudness, dB
     "seg_bright_std": (0.01, 0.20),     # std of segment brightness (0-1 scale)
+    "attack_rise_db": (0.0, 12.0),      # upper-quartile onset RMS rise over 0.1 s
 }
 
 KK_MAJOR = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
@@ -209,12 +220,21 @@ def norm(x, rng):
     return np.clip((np.asarray(x, dtype=float) - lo) / (hi - lo + EPS), 0.0, 1.0)
 
 
+def _brightness_norm(x, rng):
+    """亮度参考范围两端映射到 0.05/0.95，避免低于参考下限就被截成零。"""
+    lo, hi = map(float, rng)
+    if not (math.isfinite(lo) and math.isfinite(hi) and hi > lo):
+        raise ValueError("brightness reference bounds must be finite and increasing")
+    return expit((np.asarray(x, dtype=float) - (lo + hi) / 2) * (2 * math.log(19) / (hi - lo)))
+
+
 def _brightness(log_cent, log_hf, ranges):
-    return 0.60 * norm(log_cent, ranges["log_centroid"]) + 0.40 * norm(log_hf, ranges["log_hf"])
+    return (0.60 * _brightness_norm(log_cent, ranges["log_centroid"]) +
+            0.40 * _brightness_norm(log_hf, ranges["log_hf"]))
 
 
 # --------------------------------------------------------------------------- feature extraction
-def extract(y):
+def extract(y, extended=False):
     """Return (F, seg): raw features of the whole excerpt, and per-segment loudness / spectrum."""
     y = np.asarray(y, dtype=np.float32)
     y = y - y.mean()
@@ -242,6 +262,8 @@ def extract(y):
         return A[(freqs >= lo) & (freqs < hi)].sum()
 
     F = {}
+    if extended:
+        F["duration_sec"] = dur
     total = band(80, 8000) + EPS
     # loudness, dynamic range, loudness fluctuation
     F["loudness_db"] = float(rms_db[active].mean())
@@ -256,6 +278,10 @@ def extract(y):
     F["log_hf"] = float(np.log10(band(3000, 11025) / (band(80, 11025) + EPS) + 1e-4))
     F["lowmid_share"] = float(band(100, 800) / total)
     F["bass_share"] = float(band(40, 200) / (band(40, 8000) + EPS))
+    if extended:
+        spectrum = Pa[(freqs >= 200) & (freqs < 8000)]
+        flatness = np.exp(np.mean(np.log(spectrum + 1e-12), axis=0)) / (spectrum.mean(axis=0) + 1e-12)
+        F["noisiness"] = float(np.clip(np.mean(flatness), 0, 1))
 
     # harmonic / percussive split (soft masks with margin 2 -> a residual part is left over)
     Sb = S[(freqs >= 80) & (freqs <= 8000)][:, ::2]
@@ -286,6 +312,11 @@ def extract(y):
         F["regularity"] = float(np.clip(1.0 - F["ioi_cv"], 0.0, 1.0))
     else:                                    # too few onsets to speak of a pulse
         F["ioi_cv"], F["regularity"] = float("nan"), 0.0
+    if extended:
+        onset_frames = pk + 1
+        previous = np.maximum(0, onset_frames - max(1, int(0.1 * fps)))
+        rise = np.maximum(0, rms_db[onset_frames] - rms_db[previous])
+        F["attack_rise_db"] = float(np.percentile(rise, 75)) if len(rise) else 0.0
 
     x = oenv - oenv.mean()
     ac = np.fft.irfft(np.abs(np.fft.rfft(x, 2 * len(x))) ** 2)[:len(x)]
@@ -294,6 +325,24 @@ def extract(y):
     bpm = 60 * fps / lags
     prior = np.exp(-0.5 * np.log2(bpm / 120.0) ** 2)      # prefer 60-240 BPM around 120
     F["tempo_bpm"] = float(bpm[int(np.argmax(ac[lags] * prior))])
+    if extended:
+        F["beat_strength"] = float(np.max(ac[lags]))
+        F["beat_reliable"] = float(len(pk) >= 4 and F["beat_strength"] >= 0.15)
+        local_bpms = []
+        window = int(8 * fps)
+        step = int(4 * fps)
+        for start in range(0, max(0, len(oenv) - window + 1), step):
+            if np.count_nonzero((pk >= start) & (pk < start + window)) < 4:
+                continue
+            local = oenv[start:start + window]
+            local = local - local.mean()
+            local_ac = np.fft.irfft(np.abs(np.fft.rfft(local, 2 * len(local))) ** 2)[:len(local)]
+            local_ac /= local_ac[0] + EPS
+            if np.max(local_ac[lags]) < 0.15:
+                continue
+            local_bpms.append(float(bpm[int(np.argmax(local_ac[lags] * prior))]))
+        F["tempo_stability"] = (float(np.clip(1 - np.std(np.log2(local_bpms)) / 0.5, 0, 1))
+                                 if len(local_bpms) >= 2 and F["beat_reliable"] else float("nan"))
 
     # ---- long window: roughness, key / mode, pitch-class entropy -------------------------
     fr2 = stft_frames(y, N_LONG, HOP_LONG)
@@ -326,6 +375,18 @@ def extract(y):
     F["mode_score"], F["key_clarity"] = key_mode(pcs)
     p = pcs / (pcs.sum() + EPS)
     F["pc_entropy"] = float(-(p * np.log2(p + EPS)).sum() / math.log2(12))
+    if extended:
+        local_profiles = []
+        for start in range(0, len(chroma), 6):
+            usable = act2[start:start + 6]
+            if usable.sum() >= 3:
+                local_profiles.append(chroma[start:start + 6][usable].sum(axis=0))
+        similarities = [float(np.dot(profile, pcs) / (np.linalg.norm(profile) * np.linalg.norm(pcs) + EPS))
+                        for profile in local_profiles if profile.sum() > EPS]
+        F["tonal_stability"] = (float(np.clip(np.mean(similarities), 0, 1))
+                                if len(similarities) >= 2 and F["key_clarity"] >= MIN_TONAL_CLARITY
+                                and F["harmonicity"] >= MIN_TONAL_HARMONICITY
+                                else float("nan"))
 
     # ---- segments: loudness / brightness per 3 s ----------------------------------------
     seg_len = int(SEG_SECONDS * fps)
@@ -346,7 +407,7 @@ def extract(y):
 
 
 # --------------------------------------------------------------------------- scoring
-def score(F, seg, ranges, with_segments=False):
+def score(F, seg, ranges, with_segments=False, extended=False):
     n = lambda k: float(norm(F[k], ranges[k]))
     mode_n, clarity_n, rough_n = n("mode_score"), n("key_clarity"), n("roughness")
     loud_n, flux_n, cent_n = n("loudness_db"), n("flux"), n("log_centroid")
@@ -359,6 +420,15 @@ def score(F, seg, ranges, with_segments=False):
     else:
         loud_std, bright_std, bright_seg = 0.0, 0.0, []
     F["seg_loud_std"], F["seg_bright_std"] = loud_std, bright_std
+
+    build_direction = float("nan")
+    if extended and F.get("duration_sec", 0) >= 9 and len(seg["loud_db"]) >= 3:
+        third = max(1, len(seg["loud_db"]) // 3)
+        loud_delta = float(np.mean(seg["loud_db"][-third:]) - np.mean(seg["loud_db"][:third]))
+        bright_delta = float(np.mean(bright_seg[-third:]) - np.mean(bright_seg[:third]))
+        F["build_loud_delta_db"] = loud_delta
+        build_direction = float(np.clip(0.5 + 0.35 * np.clip(loud_delta / 12, -1, 1)
+                                        + 0.15 * np.clip(bright_delta / 0.4, -1, 1), 0, 1))
 
     values = {
         "Valence": 0.60 * mode_n + 0.25 * (1 - rough_n) + 0.15 * clarity_n,
@@ -374,13 +444,61 @@ def score(F, seg, ranges, with_segments=False):
         "BuildContrast": 0.50 * n("seg_loud_std") + 0.50 * n("seg_bright_std"),
         "HarmonicComplexity": F["pc_entropy"],
     }
+    if extended:
+        values.update({
+            "BassPresence": n("bass_share"),
+            "Noisiness": F["noisiness"],
+            "TransientSharpness": n("attack_rise_db"),
+            "TempoStability": F["tempo_stability"],
+            "TonalStability": F["tonal_stability"],
+            "BuildDirection": build_direction,
+        })
     raw = {"Tempo": (F["tempo_bpm"], "BPM"), "Density": (F["onset_rate"], "onsets/s"),
            "Dissonance": (F["roughness"], "roughness")}
+    if extended:
+        raw.update({"BassPresence": (F["bass_share"], "energy share"),
+                    "Noisiness": (F["noisiness"], "spectral flatness"),
+                    "TransientSharpness": (F["attack_rise_db"], "dB rise / 0.1 s")})
     axes = {}
-    for a in AXES:
-        axes[a] = {"zh": ZH[a], "value": round(float(np.clip(values[a], 0, 1)), 3)}
-        if a in raw:
+    for a in (AXES_V3 if extended else AXES):
+        unreliable = extended and (
+            a in ("Tempo", "RhythmicRegularity", "TempoStability") and not F["beat_reliable"]
+            or a == "TonalStability" and (F["key_clarity"] < MIN_TONAL_CLARITY
+                                           or F["harmonicity"] < MIN_TONAL_HARMONICITY)
+        )
+        valid = np.isfinite(values[a]) and not unreliable
+        axes[a] = {"zh": ZH[a], "value": round(float(np.clip(values[a], 0, 1)), 3) if valid else None}
+        if a == "Brightness":
+            axes[a]["measure"] = "spectral_brightness; not melodic or emotional brightness"
+            axes[a]["normalization"] = {
+                "method": "logistic_p05_p95",
+                "log_centroid_range": list(ranges["log_centroid"]),
+                "log_hf_range": list(ranges["log_hf"]),
+            }
+            if valid:
+                axes[a]["evidence"] = {
+                    "spectral_centroid_hz": round(max(0.0, 10 ** F["log_centroid"] - 1.0), 3),
+                    "high_frequency_energy_share": round(max(0.0, 10 ** F["log_hf"] - 1e-4), 8),
+                    "high_frequency_cutoff_hz": 3000,
+                    "centroid_component": round(float(_brightness_norm(F["log_centroid"], ranges["log_centroid"])), 6),
+                    "high_frequency_component": round(float(_brightness_norm(F["log_hf"], ranges["log_hf"])), 6),
+                    "component_weights": {"centroid": 0.6, "high_frequency": 0.4},
+                    "score_unrounded": float(values[a]),
+                }
+        if extended:
+            axes[a]["status"] = "ok" if valid else "unreliable"
+            if not valid:
+                axes[a]["reason"] = ("weak_or_missing_pulse" if a in ("Tempo", "RhythmicRegularity", "TempoStability")
+                                      and not F["beat_reliable"] else
+                                      "insufficient_local_evidence" if a == "TempoStability" else
+                                      "weak_or_missing_tonality" if a == "TonalStability" else
+                                      "insufficient_segments")
+            if a == "HarmonicComplexity":
+                axes[a]["measure"] = "pitch_class_entropy; not chord complexity"
+        if a in raw and (valid or not extended):
             axes[a]["raw"], axes[a]["unit"] = round(float(raw[a][0]), 3), raw[a][1]
+        if extended and a == "BuildDirection" and valid:
+            axes[a]["raw"], axes[a]["unit"] = round(F["build_loud_delta_db"], 3), "dB (late - early)"
     if with_segments:
         axes["BuildContrast"]["segments"] = {
             "loudness_db": [round(v, 1) for v in seg["loud_db"]],

@@ -4,6 +4,65 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres
 to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- Post-analysis background/lyrics research is now mandatory: a missing
+  `web.search` provider or a failing query fails the whole call with
+  `WEB_RESEARCH_FAILED` instead of returning an analysis without sources. No
+  config switch, no offline fallback. Batch fails as a set and returns finished
+  acoustic results under `value.partial`.
+- Research responses now record the sent `queries` and per-channel `returned` /
+  `rejected` counts, so an empty result set is distinguishable from a filter that
+  discarded everything.
+
+### Fixed
+
+- Source matching no longer requires the full filename title. Subtitles and
+  version tags (`– 新世纪福音战士 OP1 钢琴版`, `(Project CHE Special)`) are stripped
+  to a main title and matched by character/token coverage, and an exact title hit
+  no longer needs an "official/creation" marker when the provider returns no snippet.
+
+### Fixed
+
+- Replace brightness's lower-bound hard clipping with smooth reference scaling
+  in both axes versions and segment scores. Expose raw spectral measurements,
+  component contributions, and the normalization method for auditing.
+- Verify pitch-boundary hits against wider local searches, preserving confirmed
+  pitches and reporting rejected frames plus before/after boundary-note counts.
+- Summarize full-track note coverage and chronological sections rather than only
+  the first phrase. Match motifs across phrase boundaries using interval/rhythm
+  windows, and explain when no reliable repetition is detected.
+
+### Added
+
+- Default whole-song 21-target instrument recognition with local CLAP proposals,
+  AST label corroboration, timing evidence and explicit ambiguity/coverage limits.
+  Added pinned model setup with checksums and a catalog/status CLI command.
+- Default eighteen-axis analysis and combined `music_analysis` evidence for the
+  agent, joining timbre, melody, acoustic descriptors and post-analysis web
+  context. Batch summaries join context by track key; missing evidence stays explicit.
+- Normalize bracketed artist names and download/version suffixes when searching
+  song background and lyrics, without sending private directory paths.
+- Whole-song melody enabled by default for single and batch CLI/Host analysis: timestamped
+  candidate notes, phrase contours, transposed interval repetitions, and grounded
+  agent summaries. Uses local pYIN without model downloads; insufficient evidence
+  abstains, and dense mixes are explicitly marked as unseparated candidates.
+  Use `--no-melody` / `include_melody: false` to skip this stage.
+- Opt-in `axes_v3` 18-axis diagnostics for the CLI and Host single/batch tools,
+  adding bass presence, noisiness, transient sharpness, tempo stability, tonal
+  stability, and build direction. Existing `axes_v2` and four-axis scores stay intact.
+- Per-axis reliability in `axes_v3`: missing pulse, weak tonality, or insufficient
+  local evidence yields `value: null` with a reason; legacy `HarmonicComplexity`
+  identifies its pitch-class-entropy proxy explicitly.
+
+### Changed
+
+- Host tools now run local acoustic analysis or lyric transcription first, then
+  automatically search for background and lyrics. Search failures are attached
+  to the result instead of suppressing completed local work; no mode switch.
+
 ## [2.2.1] — 2026-11-01
 
 ### Fixed

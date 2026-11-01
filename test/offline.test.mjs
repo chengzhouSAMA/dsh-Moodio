@@ -183,7 +183,7 @@ await checkAsync('passes argv array with CJK path intact', async () => {
   assert.ok(seen.argv.includes('--no-segments'), 'no-segments default')
 })
 
-await checkAsync('单曲在运行 Python 前每次联网检索两类资料', async () => {
+await checkAsync('单曲声学分析完成后自动联网检索两类资料', async () => {
   const events = []
   const { registered } = makeCtx({
     config: baseConfig,
@@ -199,19 +199,20 @@ await checkAsync('单曲在运行 Python 前每次联网检索两类资料', asy
   const result = await registered.get('analyze_music_emotion').execute({ path: 'D:\\私人\\Grabbitz - Die For You.mp3' }, {})
   assert.equal(result.isError, false)
   assert.equal(events.length, 3)
-  assert.equal(events.at(-1), 'python')
+  assert.equal(events[0], 'python')
   assert.ok(result.value.research?.background?.found)
   assert.ok(result.value.research?.lyrics?.found)
-  assert.ok(events.slice(0, 2).every((q) => !q.includes('私人') && !/review|comment|评论/.test(q)))
+  assert.ok(events.slice(1).every((q) => !q.includes('私人') && !/review|comment|评论/.test(q)))
 })
 
 await checkAsync('lyrics forwards local model and audio path as separate argv', async () => {
   let seen
   const searches = []
+  const events = []
   const { registered } = makeCtx({
     config: baseConfig,
-    searchImpl: async (request) => { searches.push(request.query); return { sources: [] } },
-    onSpawn: (spec) => { seen = spec },
+    searchImpl: async (request) => { searches.push(request.query); events.push('web'); return { sources: [] } },
+    onSpawn: (spec) => { seen = spec; events.push('python') },
     spawnImpl: () => fakeHandle({ stdout: JSON.stringify({ text: 'heard words', language: 'en', segments: [] }) }),
   })
   const track = 'C:\\歌曲\\a.mp3'
@@ -223,7 +224,19 @@ await checkAsync('lyrics forwards local model and audio path as separate argv', 
   assert.equal(seen.argv[seen.argv.indexOf('--model-dir') + 1], model)
   assert.equal(seen.argv[seen.argv.indexOf('--language') + 1], 'en')
   assert.equal(searches.length, 2)
+  assert.deepEqual(events, ['python', 'web', 'web'])
   assert.ok(result.value.research?.lyrics)
+})
+
+await checkAsync('歌词转写成功但检索失败会整次失败', async () => {
+  const { registered } = makeCtx({
+    config: baseConfig,
+    searchImpl: async () => { throw new Error('offline') },
+    spawnImpl: () => fakeHandle({ stdout: JSON.stringify({ text: 'heard words' }) }),
+  })
+  const result = await registered.get('transcribe_music_lyrics').execute({ path: 'song.mp3' }, {})
+  assert.equal(result.isError, true)
+  assert.equal(result.value.code, 'WEB_RESEARCH_FAILED')
 })
 
 console.log('\n[t4] field selection')
@@ -276,6 +289,86 @@ await checkAsync('十二轴仅在显式请求时随四轴一起返回', async ()
   assert.ok(seen.argv[seen.argv.indexOf('--fields') + 1].includes('axes_v2'))
 })
 
+await checkAsync('十八轴默认开启并保留不可靠读数状态', async () => {
+  let seen
+  const { registered } = makeCtx({
+    config: baseConfig,
+    onSpawn: (spec) => { seen = spec },
+    spawnImpl: () => fakeHandle({ stdout: JSON.stringify({
+      emotion: { valence: 0.1, arousal: 0.2 },
+      emotion_4d: { emotion: '平静', texture: 0.1, grandeur: 0.2 },
+      axes_v3: { axis_count: 18, axes: { Tempo: { value: null, status: 'unreliable' } } },
+    }) }),
+  })
+  const result = await registered.get('analyze_music_emotion').execute({ path: 'x.mp3' }, {})
+  assert.equal(result.value.axes_v3.axis_count, 18)
+  assert.equal(result.value.axes_v3.axes.Tempo.status, 'unreliable')
+  assert.ok(seen.argv.includes('--axes-v3'))
+  assert.ok(!seen.argv.includes('--axes-v2'))
+  assert.ok(seen.argv[seen.argv.indexOf('--fields') + 1].includes('axes_v3'))
+})
+
+await checkAsync('默认识别乐器并把本地联合证据接入联网语境', async () => {
+  let seen
+  const { registered } = makeCtx({
+    config: baseConfig,
+    onSpawn: (spec) => { seen = spec },
+    spawnImpl: () => fakeHandle({ stdout: JSON.stringify({
+      emotion: { emotion: '平静' },
+      instruments: { status: 'candidate', candidates: [{ id: 'piano', name: '钢琴' }] },
+      music_analysis: { status: 'partial', primary_acoustic_emotion: '平静', summary: '有声学证据' },
+    }) }),
+  })
+  const directory = 'C:\\模型目录\\clap'
+  const result = await registered.get('analyze_music_emotion').execute({ path: 'x.mp3', instrument_model_dir: directory, instrument_device: 'cpu' }, {})
+  assert.ok(seen.argv.includes('--instruments'))
+  assert.ok(seen.argv.includes('--axes-v3'))
+  assert.equal(seen.argv[seen.argv.indexOf('--instrument-model-dir') + 1], directory)
+  assert.equal(seen.argv[seen.argv.indexOf('--instrument-device') + 1], 'cpu')
+  assert.equal(result.value.instruments.candidates[0].name, '钢琴')
+  assert.equal(result.value.music_analysis.primary_acoustic_emotion, '平静')
+  assert.equal(result.value.music_analysis.context.status, 'no_sources_found')
+})
+
+await checkAsync('默认分析整首旋律并返回带证据的乐句', async () => {
+  let seen
+  const melody = {
+    status: 'candidate', notes: [{ start_sec: 0.1, end_sec: 0.3, pitch_midi: 60, voicing_probability: 0.91 }],
+    phrases: [{ id: 'phrase_1', contour: 'ascending', start_sec: 0.1, end_sec: 1.0 }],
+    motifs: [], agent_summary: { text: '候选旋律上行', evidence: [{ type: 'contour', start_sec: 0.1 }] },
+  }
+  const { registered } = makeCtx({
+    config: baseConfig,
+    onSpawn: (spec) => { seen = spec },
+    spawnImpl: () => fakeHandle({ stdout: JSON.stringify({ emotion: {}, emotion_4d: {}, melody }) }),
+  })
+  const result = await registered.get('analyze_music_emotion').execute({ path: 'x.mp3' }, {})
+  assert.equal(result.value.melody.status, 'candidate')
+  assert.equal(result.value.melody.agent_summary.evidence[0].start_sec, 0.1)
+  assert.ok(seen.argv.includes('--melody'))
+  assert.equal(seen.argv[seen.argv.indexOf('--max-seconds') + 1], '0')
+  assert.ok(seen.argv[seen.argv.indexOf('--fields') + 1].includes('melody'))
+})
+
+await checkAsync('只有显式要求才跳过旋律或限制分析时长', async () => {
+  let seen
+  const { registered } = makeCtx({
+    config: baseConfig,
+    onSpawn: (spec) => { seen = spec },
+    spawnImpl: () => fakeHandle({ stdout: JSON.stringify({ emotion: {}, melody: { status: 'candidate' } }) }),
+  })
+  const result = await registered.get('analyze_music_emotion').execute({
+    path: 'x.mp3', include_melody: false, include_instruments: false, include_axes_v3: false, max_seconds: 12,
+  }, {})
+  assert.ok(seen.argv.includes('--no-melody'))
+  assert.ok(!seen.argv.includes('--melody'))
+  assert.ok(seen.argv.includes('--no-instruments'))
+  assert.ok(seen.argv.includes('--no-axes-v3'))
+  assert.equal(seen.argv[seen.argv.indexOf('--max-seconds') + 1], '12')
+  assert.ok(!seen.argv[seen.argv.indexOf('--fields') + 1].split(',').includes('melody'))
+  assert.ok(!('melody' in result.value))
+})
+
 await checkAsync('include_segments requests the segments field', async () => {
   // Regression: --fields filters segments too. Asking for the timeline without
   // requesting the field yields an empty array that looks like "no timeline".
@@ -313,17 +406,33 @@ await checkAsync('missing path argument is rejected without spawning', async () 
   assert.equal(spawned, false)
 })
 
-await checkAsync('联网失败时不启动本地声学分析', async () => {
+await checkAsync('联网失败时整次调用失败，不返回无来源的分析', async () => {
   let spawned = false
   const { registered } = makeCtx({
     config: baseConfig,
     searchImpl: async () => { throw new Error('network down') },
-    spawnImpl: () => { spawned = true; return fakeHandle() },
+    spawnImpl: () => {
+      spawned = true
+      return fakeHandle({ stdout: JSON.stringify({ emotion: { valence: 0.2, arousal: -0.1 } }) })
+    },
   })
   const result = await registered.get('analyze_music_emotion').execute({ path: 'song.mp3' }, {})
   assert.equal(result.isError, true)
   assert.equal(result.value.code, 'WEB_RESEARCH_FAILED')
-  assert.equal(spawned, false)
+  // The acoustic pass still ran before the lookup; the failure is about sources.
+  assert.equal(spawned, true)
+})
+
+await checkAsync('声学分析失败时不会发起无效检索', async () => {
+  let searched = false
+  const { registered } = makeCtx({
+    config: baseConfig,
+    searchImpl: async () => { searched = true; return { sources: [] } },
+    spawnImpl: () => fakeHandle({ exitCode: 20, stderr: JSON.stringify({ error: true, code: 'FILE_NOT_FOUND', message: 'missing' }) }),
+  })
+  const result = await registered.get('analyze_music_emotion').execute({ path: 'missing.mp3' }, {})
+  assert.equal(result.value.code, 'FILE_NOT_FOUND')
+  assert.equal(searched, false)
 })
 
 await checkAsync('non-zero exit with structured stderr is surfaced', async () => {
@@ -500,7 +609,7 @@ await checkAsync('surfaces grandeur_parts when the analyzer provides them', asyn
   assert.equal(result.value.texture_parts.spectral_flatness, 0.03)
 })
 
-await checkAsync('批量逐首检索后才执行分析，并固定检索过的曲目集合', async () => {
+await checkAsync('批量完成声学分析后逐首检索，并固定处理曲目集合', async () => {
   const events = []
   const { registered } = makeCtx({
     config: baseConfig,
@@ -513,22 +622,44 @@ await checkAsync('批量逐首检索后才执行分析，并固定检索过的�
   assert.equal(result.isError, false)
   assert.equal(events.length, 6)
   assert.equal(events[0], 'list')
-  assert.equal(events.at(-1), 'analyze')
-  assert.ok(events.slice(1, -1).every((event) => !event.includes('private')))
+  assert.equal(events[1], 'analyze')
+  assert.ok(events.slice(2).every((event) => !event.includes('private')))
   assert.equal(result.value.research_by_track.length, 2)
 })
 
-await checkAsync('批量联网失败时不分析任何曲目', async () => {
+await checkAsync('批量联网失败时整批失败，但保留已完成的声学结果', async () => {
   let analyzed = false
   const { registered } = makeCtx({
     config: baseConfig,
     searchImpl: async () => { throw new Error('offline') },
-    spawnImpl: () => { analyzed = true; return fakeHandle() },
+    spawnImpl: () => { analyzed = true; return fakeHandle({ stdout: JSON.stringify({ ok: 1, failed: 0 }) }) },
   })
   const result = await registered.get('batch_analyze_music').execute({ path: 'D:\\music' }, {})
   assert.equal(result.isError, true)
   assert.equal(result.value.code, 'WEB_RESEARCH_FAILED')
-  assert.equal(analyzed, false)
+  assert.equal(result.value.partial.ok, 1)
+  assert.equal(result.value.partial.research_failed, 1)
+  assert.equal(result.value.partial.research_by_track[0].error.code, 'WEB_RESEARCH_FAILED')
+  assert.equal(analyzed, true)
+})
+
+await checkAsync('部分音频分析失败后仍检索并返回批量汇总', async () => {
+  const events = []
+  const { registered } = makeCtx({
+    config: baseConfig,
+    listImpl: () => fakeHandle({ stdout: JSON.stringify({ pending: ['one.mp3', 'two.mp3'] }) }),
+    onSpawn: (spec) => events.push(spec.argv.includes('--list-only') ? 'list' : 'analyze'),
+    searchImpl: async () => { events.push('web'); return { sources: [] } },
+    spawnImpl: () => fakeHandle({ exitCode: 1, stdout: JSON.stringify({
+      processed: 2, ok: 1, failed: 1, out: 'results.jsonl',
+    }) }),
+  })
+  const result = await registered.get('batch_analyze_music').execute({ path: 'D:\\music' }, {})
+  assert.equal(result.isError, true)
+  assert.equal(result.value.ok, 1)
+  assert.equal(result.value.failed, 1)
+  assert.equal(result.value.research_by_track.length, 2)
+  assert.deepEqual(events, ['list', 'analyze', 'web', 'web', 'web', 'web'])
 })
 
 await checkAsync('batch strips the CLI agent-context tail', async () => {
@@ -556,6 +687,44 @@ await checkAsync('批量十二轴开关仅在显式请求时传入 CLI', async (
   })
   await registered.get('batch_analyze_music').execute({ path: 'dir', include_axes_v2: true }, {})
   assert.ok(seen.argv.includes('--axes-v2'))
+})
+
+await checkAsync('批量十八轴开关传入 CLI', async () => {
+  let seen
+  const { registered } = makeCtx({
+    config: baseConfig,
+    onSpawn: (spec) => { if (!spec.argv.includes('--list-only')) seen = spec },
+    spawnImpl: () => fakeHandle({ stdout: JSON.stringify({ ok: 1, failed: 0 }) }),
+  })
+  await registered.get('batch_analyze_music').execute({ path: 'dir', include_axes_v3: true }, {})
+  assert.ok(seen.argv.includes('--axes-v3'))
+})
+
+await checkAsync('批量默认整首旋律参数传入 CLI', async () => {
+  let seen
+  const { registered } = makeCtx({
+    config: baseConfig,
+    onSpawn: (spec) => { if (!spec.argv.includes('--list-only')) seen = spec },
+    spawnImpl: () => fakeHandle({ stdout: JSON.stringify({ ok: 1, failed: 0 }) }),
+  })
+  await registered.get('batch_analyze_music').execute({ path: 'dir' }, {})
+  assert.ok(seen.argv.includes('--melody'))
+  assert.ok(seen.argv.includes('--instruments'))
+  assert.ok(seen.argv.includes('--axes-v3'))
+  assert.equal(seen.argv[seen.argv.indexOf('--max-seconds') + 1], '0')
+})
+
+await checkAsync('批量按曲目键合并本地解释和联网结果', async () => {
+  const { registered } = makeCtx({
+    config: baseConfig,
+    spawnImpl: () => fakeHandle({ stdout: JSON.stringify({ ok: 1, failed: 0, analyses: [
+      { path: 'song.mp3', music_analysis: { status: 'partial', primary_acoustic_emotion: '平静' } },
+    ] }) }),
+  })
+  const result = await registered.get('batch_analyze_music').execute({ path: 'dir' }, {})
+  assert.equal(result.value.analyses[0].path, 'song.mp3')
+  assert.equal(result.value.analyses[0].music_analysis.context.song, 'song')
+  assert.equal(result.value.analyses[0].music_analysis.primary_acoustic_emotion, '平静')
 })
 
 await checkAsync('batch always passes --quiet so stdout stays pure', async () => {
@@ -616,6 +785,8 @@ await checkAsync('no projectDir config falls back to the bundled python/ dir', a
   })
   await registered.get('analyze_music_emotion').execute({ path: 'x.mp3' }, {})
   assert.equal(path.basename(seen.cwd), 'python', `cwd should be <pkg>/python, got ${seen.cwd}`)
+  assert.equal(seen.cwd, path.join(pkgRoot, 'python'))
+  assert.ok(seen.argv.includes(path.join(pkgRoot, 'python', 'moodio.py')))
   assert.ok(
     seen.argv.some((a) => typeof a === 'string' && a.endsWith('moodio.py')),
     'analyzer path must end with moodio.py',

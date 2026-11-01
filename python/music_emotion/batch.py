@@ -60,6 +60,11 @@ def analyze_one(
     with_neural: bool = False,
     neural_model_dir: Optional[str] = None,
     with_axes_v2: bool = False,
+    with_axes_v3: bool = False,
+    with_melody: bool = False,
+    with_instruments: bool = False,
+    instrument_model_dir: Optional[str] = None,
+    instrument_device: str = "auto",
 ) -> Dict[str, Any]:
     """分析单个文件，返回紧凑记录。异常在此吞掉并转成 error 字段。
 
@@ -92,6 +97,11 @@ def analyze_one(
             with_neural=with_neural,
             neural_model_dir=neural_model_dir,
             with_axes_v2=with_axes_v2,
+            with_axes_v3=with_axes_v3,
+            with_melody=with_melody,
+            with_instruments=with_instruments,
+            instrument_model_dir=instrument_model_dir,
+            instrument_device=instrument_device,
         )
         d = report.to_dict(include_segments=False)
         feats = d.get("features") or {}
@@ -122,6 +132,14 @@ def analyze_one(
         }
         if with_axes_v2:
             rec["axes_v2"] = d["axes_v2"]
+        if with_axes_v3:
+            rec["axes_v3"] = d["axes_v3"]
+        if with_melody:
+            rec["melody"] = d["melody"]
+        if with_instruments:
+            rec["instruments"] = d["instruments"]
+        if "music_analysis" in d:
+            rec["music_analysis"] = d["music_analysis"]
         return rec
     except MusicEmotionError as exc:
         return {
@@ -197,6 +215,11 @@ def run_batch(
     log: Optional[Callable[[str], None]] = None,
     preflight_files: Optional[List[str]] = None,
     with_axes_v2: bool = False,
+    with_axes_v3: bool = False,
+    with_melody: bool = False,
+    with_instruments: bool = False,
+    instrument_model_dir: Optional[str] = None,
+    instrument_device: str = "auto",
 ) -> Dict[str, Any]:
     """跑完整个目录，逐条追加写入 out_path，返回汇总。"""
     say = log or (lambda _m: None)
@@ -205,7 +228,7 @@ def run_batch(
 
     selection = pending_audio(root, out_path, limit=limit, resume=resume)
     if preflight_files is not None and selection["pending"] != preflight_files:
-        raise ValueError("preflight song list changed; search again before analysis")
+        raise ValueError("preflight song list changed; retry batch selection")
     root_abs = os.path.abspath(root)
     todo = [(os.path.join(root_abs, *rel.split("/")), root_abs) for rel in selection["pending"]]
     if not resume and out_p.exists():
@@ -223,6 +246,7 @@ def run_batch(
     ok = 0
     failed = 0
     err_counter: Dict[str, int] = {}
+    analyses = []
 
     from concurrent.futures import ProcessPoolExecutor, as_completed
 
@@ -231,7 +255,8 @@ def run_batch(
             futs = {
                 ex.submit(
                     analyze_one, path, r, segment_sec, hop_sec,
-                    max_seconds, with_neural, neural_model_dir, with_axes_v2,
+                    max_seconds, with_neural, neural_model_dir, with_axes_v2, with_axes_v3, with_melody,
+                    with_instruments, instrument_model_dir, instrument_device,
                 ): path
                 for path, r in todo
             }
@@ -254,6 +279,8 @@ def run_batch(
                     say(f"  [{i}/{len(todo)}] FAIL {rec['error']} {os.path.basename(src)[:50]}")
                 else:
                     ok += 1
+                    if "music_analysis" in rec:
+                        analyses.append({"path": rec["path"], "music_analysis": rec["music_analysis"]})
                     if i % 10 == 0 or i == len(todo):
                         el = time.time() - t_all
                         eta = (len(todo) - i) * el / max(i, 1) / 60
@@ -270,6 +297,7 @@ def run_batch(
         "ok": ok,
         "failed": failed,
         "error_breakdown": err_counter,
+        "analyses": analyses,
         "out": str(out_p),
         "elapsed_sec": round(time.time() - t_all, 1),
     }

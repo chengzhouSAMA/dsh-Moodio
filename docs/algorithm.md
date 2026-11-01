@@ -1,8 +1,9 @@
 # Algorithm notes
 
 This document records *why* the model is shaped the way it is, including the
-mistakes that were found by measuring real music. Every threshold below was set
-from measured distributions, not guessed.
+mistakes that were found by measuring real music. The original four-axis
+classification thresholds below were set from measured distributions; the
+new `axes_v3` reliability cutoffs are provisional heuristics.
 
 ## 1. Pipeline
 
@@ -165,6 +166,98 @@ be over-reading.
 
 ## 7. Known limitations
 
+### Instrument candidates and combined interpretation
+
+The default CLI/Host workflow analyzes all ten-second windows, including the
+tail, with local CLAP audio/text embeddings over the 21 requested targets.
+Similarity is cosine similarity, not calibrated confidence. An AST AudioSet
+classifier corroborates available supervised labels. Secondary instruments
+require direct classifier support as well as text/audio similarity; a high
+secondary CLAP similarity alone is not treated as co-occurrence. Unknown audio,
+near-tied timbres and classifier disagreement remain explicit.
+
+Western target names have direct AST labels. Several Chinese targets only have
+family-level support (for example, Zither cannot distinguish guzheng from guqin),
+and yangqin has no corresponding supervised label in this verifier. The catalog
+reports these distinctions. The fixed thresholds are provisional, and no
+21-class accuracy benchmark is claimed. Window support is not exact audible
+presence duration. Dense ensembles and synthesized instruments remain difficult.
+
+Model setup pins revisions and verifies SHA-256 for CLAP (Apache-2.0) and AST
+(BSD-3-Clause); analysis never downloads weights or sends audio to a service.
+`music_analysis` combines the acoustic prior, instrument timing/verification,
+melody coverage and eighteen-axis signals. The Host attaches sourced background
+and lyric links after local analysis, with explicit instructions for the agent to
+form a combined emotion explanation, cite evidence and discuss conflicts.
+External snippets are untrusted data; lyric links do not prove vocals were
+detected or that the lyric text has been read. There is no invented fused
+probability, and the original acoustic measurements remain auditable.
+
+The optional `axes_v3` diagnostics add six independent acoustic descriptors
+(bass energy share, spectral flatness, onset rise, local tempo stability, local
+chroma stability, and early-to-late loudness/brightness direction). All 18 are
+descriptors, not trained predictions of human emotion. In `axes_v3`, unreliable
+pulse/tonality evidence or too few local windows yields a per-axis `null` value
+and reason. Both versions use the same twelve shared descriptors; brightness
+normalization is updated in both as described below.
+The legacy `HarmonicComplexity` is pitch-class entropy: a wide pitch-class
+distribution is not necessarily complex chord harmony. That proxy is explicitly
+identified in the `axes_v3` response. The new axes use fixed heuristic ranges
+until an annotated music corpus can validate calibration and distinctiveness.
+
+### Brightness normalization
+
+Brightness combines log spectral centroid (weight 0.6) with log energy share
+above 3 kHz (weight 0.4). The old clipped normalization turned both components
+into zero below their reference lower bounds, so a measured spectrum could be
+reported as zero brightness. Only these brightness components now use a smooth
+logistic mapping: the reference lower/upper anchors map to 0.05/0.95, with 0.5
+at their midpoint. The existing default anchors remain heuristic, and a custom
+calibration still supplies its own ranges. These scores are not probabilities.
+
+Global and segment brightness use the same mapping; consequently BuildContrast
+and the brightness part of BuildDirection can also change. Other axis mappings
+and the four-axis emotion calculation are unaffected. The Brightness result
+includes the normalization method, raw spectral centroid/high-frequency share,
+component values, weights, and unrounded score. Recompute historical results
+before comparing scores across this normalization change; spectral brightness
+does not by itself measure a melody's perceived emotional brightness.
+
+### Candidate melody (enabled by default in CLI and Host)
+
+The analyzed mono waveform is resampled to 11,025 Hz, then `librosa.pyin`
+estimates F0 and voicing probability per frame in C3–C7. Consecutive stable
+frames form timestamped MIDI notes (`voicing_probability` does **not** measure
+pitch accuracy). Frames within half a semitone of either search boundary undergo
+a second estimate with that boundary expanded by an octave. Only consistent,
+voiced estimates away from the expanded boundaries survive. Verification runs in
+ten-second blocks with context. `quality.boundary_validation` reports raw and
+retained lower-bound note counts/fractions, confirmed/rejected frames, and ranges.
+This guards boundary clipping without blindly deleting genuine C3 notes.
+
+A gap of at least 0.35 s, eight notes or eight seconds splits display phrases.
+Repetition detection independently indexes sliding windows of 4–12 notes, even
+across display-phrase boundaries. It compares intervals and normalized onset
+spacing, accepts transposition and uniform tempo changes, requires nonoverlapping
+occurrences, and permits only one 1-semitone interval difference for 5+ notes.
+Long rests stop windows; redundant subwindows are suppressed. An empty result
+has `motif_search` diagnostics and does not imply no repetitions in the original.
+
+`agent_summary.overview` separates full scan duration from detected-note coverage;
+up to six chronological `sections` select representative evidence across the
+whole analyzed duration and expose unsupported regions. Every contour/repetition
+claim links to its own timestamps. Too few notes return `insufficient_evidence`.
+
+This is a **monophonic candidate** tracker, not multi-instrument transcription:
+it does not separate vocals or instruments, distinguish bass from lead, identify
+the chorus, or certify pitch in a dense mix. CLI and Host calls analyze the whole
+song including melody by default; `--no-melody` / `include_melody: false` skips
+this stage. The low-level Python API retains its optional `with_melody` parameter.
+No weight download or online service is needed.
+Real mixed recordings with note/phrase annotations are still needed to quantify
+note F1, onset timing, and motif precision before promoting this to a reliable
+lead-melody detector. This output never feeds the emotion axes.
+
 1. **Tempo ambiguity.** Autocorrelation can peak at both `t` and `2t`; a track
    measured at 95.7 BPM may really be 184.6. Since tempo carries 0.30 of arousal,
    a wrong octave moves the result. `_tempo_fn` uses the median over the onset
@@ -195,5 +288,8 @@ be over-reading.
 | `test_four_axis.py` | 悲壮 ≠ 悲伤; 热烈 ≠ 欢快; slow major stays 平静 |
 | `test_batch.py` | resume ignores failures, scan is ordered, single failure is captured not raised |
 | `validate_directionality.py` | synthesised stimuli move the axes in the literature's directions |
+| `test_axes_v3.py` | 18-axis schema, no-pulse/weak-key nulls, acoustic directionality, legacy invariants |
+| `test_melody.py` | pitch/time from synthesized notes, transposed motifs, false matches, abstention, CLI compatibility |
+| `test_instruments.py` | target coverage, score alignment, unknown/ambiguity handling, whole-track windows, classifier crosschecks, fusion limits |
 
 All of these run without an audio corpus, which is why CI can execute them.

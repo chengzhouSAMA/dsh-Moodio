@@ -5,6 +5,10 @@ scipy>=1.9
 librosa>=0.10.0
 soundfile>=0.12.0
 
+# 可选本地乐器模型：python -m pip install -e "python[instruments]"
+# 分析默认请求乐器候选；未安装依赖/权重时显式返回 unavailable，不中断声学分析。
+# 显式下载约 1 GB 的 CLAP + AST 权重：python python/moodio.py instruments setup
+
 # Optional: neural cross-check (`--neural`). Not needed for the default path.
 # These are heavy (torch) and the model weights are licensed separately
 # (CC-BY-NC-SA-4.0). Install only if you want the sidecar signal:

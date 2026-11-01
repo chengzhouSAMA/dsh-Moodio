@@ -13,7 +13,7 @@ description: 把 moodio 接进 DSH 作为工具或 skill
 3. 正文里给出绝对路径命令，例如：
 
    ```
-   python C:\Users\35968\Desktop\英雄主义\moodio.py analyze --path "<file>"
+   python C:\Users\35968\Desktop\dsh-Moodio\python\moodio.py analyze --path "<file>"
    ```
 
 4. 重启会话后，用户提到"分析音乐情绪"时该 skill 会被加载。

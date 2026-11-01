@@ -5,10 +5,10 @@ description: 调用 moodio 的标准流程
 
 ## 单曲
 
-1. 先用 `--max-seconds 30` 快速试跑，确认路径与格式没问题：
+1. 默认读取整首并分析旋律，不自动截取开头；仅在用户明确要求预览时设置 `--max-seconds`：
 
    ```
-   moodio analyze --path "<file>" --max-seconds 30 --no-segments
+   moodio analyze --path "<file>" --no-segments
    ```
 
 2. 正式分析。长音频用 `--segment-sec 6 --hop-sec 3` 控制 token 量
@@ -35,18 +35,24 @@ description: 调用 moodio 的标准流程
 
 6. 只关心某一维度时用 `--fields emotion,arc` 省 token。
 
+7. 问音符走向或重复时用 `--melody --fields clip,melody,warnings`；按
+   `melody.agent_summary.evidence` 引用秒数。`status: insufficient_evidence`
+   时拒绝推断；混音结果只是候选，不能证明已找到主旋律或副歌。
+
 ## 整库
 
-单曲 5 分钟的歌约 30~50 秒，整库不要循环调用 `analyze`——用 `batch`：
+整曲分析耗时取决于时长、CPU 和模型加载；整库用 `batch` 复用 worker 中的乐器模型：
 
 ```
-moodio batch --path "<dir>" --out results.jsonl --workers 6 --segment-sec 10 --hop-sec 10
+moodio batch --path "<dir>" --out results.jsonl --workers 1 --segment-sec 10 --hop-sec 10
 ```
 
 - 逐条**追加**写入 JSONL，进程被杀也不丢已完成的部分。
 - 重跑同一条命令即续跑：已成功的跳过，失败的**会重试**。
 - `--limit N` 只处理 N 首（试跑用）；`--no-resume` 清空重来。
 - 进度走 **stderr**，stdout 只有最终汇总 JSON，可以安全重定向。
+- 默认乐器模型会在每个 worker 中单独加载，默认使用 1 个 worker；确认内存充足后再增加。
+- 用 `music_analysis` 联合解释乐器、旋律与十八轴；Host 自动附上联网语境。旧 JSONL 续跑不会补充新字段，需使用新的输出路径。
 
 再汇总成报告：
 
